@@ -1,5 +1,6 @@
 using System.Collections;
 using UnityEngine;
+using TMPro;
 
 [DefaultExecutionOrder(-1)]
 public class Game : MonoBehaviour
@@ -7,6 +8,15 @@ public class Game : MonoBehaviour
     public int width = 16;
     public int height = 16;
     public int mineCount = 32;
+
+    [Header("能量系统")]
+public int energy = 0;        // 当前能量
+public int maxEnergy = 100;   // 能量上限
+public int energyPerCell = 5; // 每点开一个格子给多少能量
+
+// 引用 UI 组件（稍后会在 Unity 界面里关联）
+public UnityEngine.UI.Slider energySlider; 
+public TMPro.TextMeshProUGUI energyText;
 
     private Board board;
     private CellGrid grid;
@@ -40,6 +50,8 @@ public class Game : MonoBehaviour
 
         grid = new CellGrid(width, height);
         board.Draw(grid);
+        energy = 0; // 能量清零
+        AddEnergy(0); // 调用一下这个方法，用来刷新一次 UI 显示
     }
 
     private void Update()
@@ -80,29 +92,32 @@ public class Game : MonoBehaviour
     }
 
     private void Reveal(Cell cell)
+{
+    if (cell.revealed) return;
+    if (cell.flagged) return;
+
+    switch (cell.type)
     {
-        if (cell.revealed) return;
-        if (cell.flagged) return;
+        case Cell.Type.Mine:
+            Explode(cell);
+            break;
 
-        switch (cell.type)
-        {
-            case Cell.Type.Mine:
-                Explode(cell);
-                break;
+        case Cell.Type.Empty:
+            // 只要不是雷，就加能量
+            AddEnergy(energyPerCell); 
+            StartCoroutine(Flood(cell));
+            CheckWinCondition();
+            break;
 
-            case Cell.Type.Empty:
-                StartCoroutine(Flood(cell));
-                CheckWinCondition();
-                break;
-
-            default:
-                cell.revealed = true;
-                CheckWinCondition();
-                break;
-        }
-
-        board.Draw(grid);
+        default: // 这里通常是数字格
+            AddEnergy(energyPerCell); 
+            cell.revealed = true;
+            CheckWinCondition();
+            break;
     }
+
+    board.Draw(grid);
+}
 
     private IEnumerator Flood(Cell cell)
     {
@@ -278,5 +293,20 @@ public class Game : MonoBehaviour
         Vector3Int cellPosition = board.tilemap.WorldToCell(worldPosition);
         return grid.TryGetCell(cellPosition.x, cellPosition.y, out cell);
     }
+
+    private void AddEnergy(int amount)
+{
+    energy += amount;
+    // 确保能量不会超过上限，也不会低于 0
+    energy = Mathf.Clamp(energy, 0, maxEnergy);
+
+    // 更新 UI 显示
+    if (energySlider != null) {
+        energySlider.value = energy;
+    }
+    if (energyText != null) {
+        energyText.text = $"Energy: {energy} / {maxEnergy}";
+    }
+}
 
 }
