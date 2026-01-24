@@ -1,8 +1,32 @@
+# 必须忽略的缓存目录
 /[Ll]ibrary/
 /[Tt]emp/
 /[Oo]bj/
 /[Bb]uild/
-/[Logs]/
-/[MemoryCaptures]/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Mm]emoryCaptures/
+/[Uu]serSettings/
+
+# 自动生成的工程文件（Visual Studio/VS Code）
 *.csproj
 *.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.opendb
+*.VC.db
+
+# 隐藏的元数据目录
+.vs/
+.gradle/
+.plastic/
+
+# 操作系统生成的杂项
+.DS_Store
+Thumbs.db
