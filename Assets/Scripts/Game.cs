@@ -294,6 +294,7 @@ public TMPro.TextMeshProUGUI energyText;
         return grid.TryGetCell(cellPosition.x, cellPosition.y, out cell);
     }
 
+// 增加或减少能量的方法
     private void AddEnergy(int amount)
 {
     energy += amount;
@@ -307,6 +308,44 @@ public TMPro.TextMeshProUGUI energyText;
     if (energyText != null) {
         energyText.text = $"Energy: {energy} / {maxEnergy}";
     }
+}
+
+// 技能1：雷达扫描 - 消耗30能量，随机标出一颗雷
+public void UseRadarSkill()
+{
+    // 1. 检查能量够不够
+    if (energy < 30)
+    {
+        Debug.Log("Energy is insufficient. You need 30 points of energy!");
+        return;
+    }
+
+    // 2. 寻找一颗还没被标记、也没被翻开的雷
+    for (int x = 0; x < width; x++)
+    {
+        for (int y = 0; y < height; y++)
+        {
+            Cell cell = grid[x, y];
+            
+            // 如果是雷，且玩家还没发现它
+            if (cell.type == Cell.Type.Mine && !cell.revealed && !cell.flagged)
+            {
+                // 扣除能量
+                AddEnergy(-30); 
+                
+                // 帮玩家插上旗子
+                cell.flagged = true;
+                
+                // 刷新画面
+                board.Draw(grid);
+                
+                Debug.Log("The radar has detected landmines!");
+                return; // 发现一颗就结束函数
+            }
+        }
+    }
+    
+    Debug.Log("There are no more undiscovered lightning strikes on the field.");
 }
 
 }
