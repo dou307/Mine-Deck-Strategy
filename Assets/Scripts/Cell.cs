@@ -9,6 +9,14 @@ public class Cell
         Number,
     }
 
+    //增加玩家枚举
+    public enum Owner
+    {
+        None,
+        PlayerA,
+        PlayerB,
+    }
+
     public Vector3Int position;
     public Type type;
     public int number;
@@ -16,4 +24,7 @@ public class Cell
     public bool flagged;
     public bool exploded;
     public bool chorded;
+
+    public Owner owner = Owner.None;
+    public float lockTimer = 0f;//占领锁定倒计时
 }

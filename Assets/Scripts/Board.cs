@@ -20,6 +20,12 @@ public class Board : MonoBehaviour
     public Tile tileNum7;
     public Tile tileNum8;
 
+    //定义玩家颜色
+    public Color colorPlayerA = new Color(1f, 0.5f, 0.5f);//淡红色
+    public Color colorPlayerB = new Color(0.5f, 0.5f, 1f);//淡蓝色
+    public Color colorNone = Color.white;
+    public Color colorLocked = Color.yellow;//黄色表示锁定中
+
     private void Awake()
     {
         tilemap = GetComponent<Tilemap>();
@@ -35,7 +41,21 @@ public class Board : MonoBehaviour
             for (int y = 0; y < height; y++)
             {
                 Cell cell = grid[x, y];
-                tilemap.SetTile(cell.position, GetTile(cell));
+                Vector3Int pos = cell.position;
+                tilemap.SetTile(pos, GetTile(cell));
+
+                // --- 工作包A：处理颜色和锁定状态 ---
+                tilemap.SetTileFlags(pos, TileFlags.None); // 允许修改颜色
+                
+                if (cell.lockTimer > 0) {
+                    tilemap.SetColor(pos, colorLocked);
+                } else {
+                    switch (cell.owner) {
+                        case Cell.Owner.PlayerA: tilemap.SetColor(pos, colorPlayerA); break;
+                        case Cell.Owner.PlayerB: tilemap.SetColor(pos, colorPlayerB); break;
+                        default: tilemap.SetColor(pos, colorNone); break;
+                    }
+                }
             }
         }
     }
