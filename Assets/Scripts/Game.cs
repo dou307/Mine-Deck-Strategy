@@ -5,10 +5,31 @@ using TMPro;
 [DefaultExecutionOrder(-1)]
 public class Game : MonoBehaviour
 {
+
+    [Header("回合制设置")]
+    public Cell.Owner currentTurn = Cell.Owner.PlayerA; // 记录当前是谁的回合
+    public Color activeTextColor = Color.white;         // 当前回合玩家名字颜色
+    public Color inactiveTextColor = Color.gray;        // 等待中玩家名字颜色
+
+
     [Header("地图设置")]
-    public int width = 16;
+    public int width = 32;
     public int height = 16;
-    public int mineCount = 32;
+    public int mineCount = 100;
+
+     [Header("血量系统")]
+    public int maxHealth = 100;
+    public int damagePerMine = 5;
+    
+    // 玩家 A 血量
+    public int healthA = 100;
+    public UnityEngine.UI.Slider hpSliderA;
+    public TMPro.TextMeshProUGUI hpTextA;
+
+    // 玩家 B 血量
+    public int healthB = 100;
+    public UnityEngine.UI.Slider hpSliderB;
+    public TMPro.TextMeshProUGUI hpTextB;
 
     [Header("能量系统 - 玩家 A (红)")]
     public int energyA = 0;
@@ -25,7 +46,7 @@ public class Game : MonoBehaviour
     public int energyPerCell = 5;
     [Header("竞技设置")]
 
-    public Vector2Int p2CursorPos = new Vector2Int(15, 15); // P2 初始位置（比如右上角）
+    public Vector2Int p2CursorPos = new Vector2Int(31, 15); // P2 初始位置（比如右上角）
     public Transform p2CursorVisual; // 在编辑器里拖入一个高亮方框，显示P2在哪
     public float occupationLockTime = 3.0f; // 领地占领锁定时间
 
@@ -44,7 +65,6 @@ public class Game : MonoBehaviour
 
     private void NewGame()
 {
-    // 1. 停止上局所有的洪水填充（Flood Fill）协程，防止新旧混淆
     StopAllCoroutines();
 
     // 2. 根据棋盘宽高将摄像机居中
@@ -66,8 +86,17 @@ public class Game : MonoBehaviour
     // 传入 0 是因为 AddEnergy 内部封装了刷新 UI 的逻辑
     AddEnergy(Cell.Owner.PlayerA, 0);
     AddEnergy(Cell.Owner.PlayerB, 0);
+
+    healthA = maxHealth;
+    healthB = maxHealth;
+    UpdateHealthUI(Cell.Owner.PlayerA);
+    UpdateHealthUI(Cell.Owner.PlayerB);
+
+    // --- 新增代码：重置回合 ---
+    currentTurn = Cell.Owner.PlayerA;
+    UpdateTurnUI(); // 刷新一下文字颜色
     
-    Debug.Log("新对局已开始：能量已清空，双方基地准备就绪。");
+    Debug.Log("新对局已开始：能量已清空，双方血量已重置，基地准备就绪。");
 }
 
 private void Update()
@@ -86,8 +115,38 @@ private void Update()
     if (Input.GetKeyDown(KeyCode.N)) NewGame();
 }
 
-// --- 附带必须的支撑函数 ---
+private void SwitchTurn()
+{
+    // 1. 切换枚举
+    if (currentTurn == Cell.Owner.PlayerA)
+    {
+        currentTurn = Cell.Owner.PlayerB;
+    }
+    else
+    {
+        currentTurn = Cell.Owner.PlayerA;
+    }
 
+    // 2. 更新 UI 显示 (让当前玩家的名字变亮，另一方变暗)
+    UpdateTurnUI();
+}
+
+private void UpdateTurnUI()
+{
+    if (energyTextA && energyTextB)
+    {
+        if (currentTurn == Cell.Owner.PlayerA)
+        {
+            energyTextA.color = activeTextColor;
+            energyTextB.color = inactiveTextColor;
+        }
+        else
+        {
+            energyTextA.color = inactiveTextColor;
+            energyTextB.color = activeTextColor;
+        }
+    }
+}
 private void HandleP2Movement()
 {
     Vector2Int move = Vector2Int.zero;
@@ -116,47 +175,50 @@ private Cell GetMouseCell()
     // 玩家 1：完全基于鼠标，传入鼠标当前的格子
     private void HandleP1MouseInput(Cell.Owner player)
     {
+        if (currentTurn != player) return;// 如果不是 P1 的回合，直接退出，禁止操作
+
         Cell targetCell = GetMouseCell(); // 获取鼠标指向的格子
         if (targetCell == null) return;
 
         if (Input.GetMouseButtonDown(0)) {
-            Reveal(player, targetCell);
+        // 尝试翻开，如果成功翻开/占领，内部会切换回合
+            if (Reveal(player, targetCell)) SwitchTurn(); 
         } else if (Input.GetMouseButtonDown(1)) {
-            Flag(player, targetCell);
+            if (Flag(player, targetCell)) SwitchTurn();
         } else if (Input.GetMouseButton(2)) {
-            Chord(targetCell); 
+            Chord(targetCell); // 预览不消耗回合
         } else if (Input.GetMouseButtonUp(2)) {
-            Unchord(player, targetCell);
+            if (Unchord(player, targetCell)) SwitchTurn();
         }
     }
 
     // 玩家 2：完全基于键盘，传入 WASD 选中的格子
     private void HandleP2KeyboardInput(Cell.Owner player)
     {
-        // 1. 处理 WASD 移动光标坐标
+        // 1. 允许 P2 随时移动光标 (保持原有移动逻辑)
         HandleP2CursorMovement();
 
-        // 2. 获取光标坐标对应的格子
+        // 更新光标视觉位置
+        if (p2CursorVisual != null) {
+            Vector3 worldPos = board.tilemap.CellToWorld((Vector3Int)p2CursorPos);
+            p2CursorVisual.position = worldPos + new Vector3(0.5f, 0.5f, 0);
+        }
+
+        // 【新增】动作拦截：如果不是 P2 的回合，不处理按键动作
+        if (currentTurn != player) return;
+
         Cell targetCell = grid.GetCell(p2CursorPos.x, p2CursorPos.y);
         if (targetCell == null) return;
 
-        // 3. 处理按键动作：空格点击，F插旗
         if (Input.GetKeyDown(KeyCode.Space)) {
-            Reveal(player, targetCell);
+            if (Reveal(player, targetCell)) SwitchTurn();
         } else if (Input.GetKeyDown(KeyCode.F)) {
-            Flag(player, targetCell);
+            if (Flag(player, targetCell)) SwitchTurn();
         } 
-        // 如果 P2 也需要 Chord 功能，可以绑定到其他按键，例如 E
         else if (Input.GetKeyDown(KeyCode.E)) {
             Chord(targetCell);
         } else if (Input.GetKeyUp(KeyCode.E)) {
-            Unchord(player, targetCell);
-        }
-
-        // 4. 更新 P2 光标的视觉位置 (把 P2 的光标物体移动到对应的世界坐标)
-        if (p2CursorVisual != null) {
-            Vector3 worldPos = board.tilemap.CellToWorld((Vector3Int)p2CursorPos);
-            p2CursorVisual.position = worldPos + new Vector3(0.5f, 0.5f, 0); // +0.5偏移使光标居中
+            if (Unchord(player, targetCell)) SwitchTurn();
         }
     }
 
@@ -180,90 +242,97 @@ private Cell GetMouseCell()
     #region 核心动作 (Actions)
 
     // 翻开/占领逻辑
-private void Reveal(Cell.Owner player, Cell cell) 
-{
-    // 1. 基础合法性检查：如果格子不存在，直接退出
-    if (cell == null) return;
-
-    // 2. 【核心博弈：锁定逻辑】
-    // 如果格子被别人占领了，且还在 3 秒保护期内，操作无效
-    if (cell.lockTimer > 0 && cell.owner != player && cell.owner != Cell.Owner.None) {
-        Debug.Log("格子被锁定中，无法操作！");
-        return; 
-    }
-
-    // 3. 【地图生成逻辑】
-    // 如果是整局游戏第一次点击，生成地雷（确保第一下不是雷）
-    if (!generated) {
-        grid.GenerateMines(cell, mineCount);
-        grid.GenerateNumbers();
-        generated = true;
-    }
-
-    // 4. 【分流：入侵 vs 正常点开】
-    if (cell.owner != Cell.Owner.None && cell.owner != player) {
-        // 如果格子的主人不是我，说明我在“入侵”对方领土
-        CaptureCell(player, cell); 
-    } else {
-        // 如果格子是中立的或者是我的，正常执行点开逻辑
-        ExecuteReveal(player, cell); 
-    }
-
-    // 5. 每次动作完重绘地图
-    board.Draw(grid);
-}
-
-private void ExecuteReveal(Cell.Owner player, Cell cell)
-{
-    // 如果已经翻开、插旗或是雷，则停止
-    if (cell.revealed || cell.flagged) return;
-
-    // 如果是雷
-    if (cell.type == Cell.Type.Mine)
+    private bool Reveal(Cell.Owner player, Cell cell) 
     {
-        //ExecuteExplode(player, cell);
-        return;
-    }
+        if (cell == null) return false;
 
-    // 如果是空格 (0)
-    if (cell.type == Cell.Type.Empty)
-    {
-        // 只有这里需要启动协程进行连锁翻开
-        StartCoroutine(Flood(cell, player));
-    }
-    else // 如果是数字格 (1-8)
-    {
-        // 数字格只翻开自己，不触发扩散
-        cell.revealed = true;
-        cell.owner = player;
-        cell.lockTimer = occupationLockTime;
-        AddEnergy(player, energyPerCell);
-    }
+        // 锁定检查
+        if (cell.lockTimer > 0 && cell.owner != player && cell.owner != Cell.Owner.None) {
+            Debug.Log("格子被锁定中！");
+            return false; // 操作无效，不切换回合
+        }
 
-    CheckWinCondition();
-    board.Draw(grid);
-}
+        // 地图生成
+        if (!generated) {
+            grid.GenerateMines(cell, mineCount);
+            grid.GenerateNumbers();
+            generated = true;
+        }
 
-private void Flag(Cell.Owner player, Cell cell)
-{
-    // 1. 基础合法性检查：如果格子不存在，直接退出
-    if (cell == null) return;
+        bool actionTaken = false;
 
-    // 2. 只有没翻开的格子才能插旗
-    if (cell.revealed) return;
+        // 分流逻辑
+        if (cell.owner != Cell.Owner.None && cell.owner != player) {
+            CaptureCell(player, cell);
+            actionTaken = true; // 发生了入侵，算一回合
+        } else {
+            // 如果 ExecuteReveal 真的做了什么，才算一回合
+            actionTaken = ExecuteReveal(player, cell); 
+        }
 
-    // 3. 锁定检查：如果格子被别人占领且在保护期，无法插旗
-    if (cell.lockTimer > 0 && cell.owner != player && cell.owner != Cell.Owner.None) {
-        return;
-    }
-
-    // 4. 只能在自己领地或中立地区插旗
-    if (cell.owner == Cell.Owner.None || cell.owner == player) {
-        cell.flagged = !cell.flagged;
-        cell.owner = player; // 插旗也算占领该格
         board.Draw(grid);
+        return actionTaken;
     }
-}
+
+    private bool ExecuteReveal(Cell.Owner player, Cell cell)
+    {
+        if (cell.revealed) return false;
+        if (cell.flagged) return false;
+
+        if (cell.type == Cell.Type.Mine)
+        {
+            // 1. 将地雷设为已翻开、已爆炸状态（为了让 Board 显示爆炸图块）
+            cell.revealed = true;
+            cell.exploded = true;
+            
+            cell.owner = player;
+
+            // 2. 扣除血量
+            TakeDamage(player, damagePerMine);
+
+            // 3. 重绘地图显示这个雷
+            board.Draw(grid);
+
+            // 4. 返回 true，表示执行了动作，这会触发外部的 SwitchTurn()，换对方行动
+            // (也就是说，踩雷不仅扣血，还会结束当前回合)
+            return true; 
+        }
+
+        if (cell.type == Cell.Type.Empty)
+        {
+            StartCoroutine(Flood(cell, player));
+        }
+        else
+        {
+            cell.revealed = true;
+            cell.owner = player;
+            cell.lockTimer = occupationLockTime;
+            AddEnergy(player, energyPerCell);
+        }
+
+        CheckWinCondition(); // 检查是否因为翻开了所有非雷格子而获胜
+        return true;
+    }
+
+    private bool Flag(Cell.Owner player, Cell cell)
+    {
+        if (cell == null) return false;
+        if (cell.revealed) return false;
+
+        // 锁定检查
+        if (cell.lockTimer > 0 && cell.owner != player && cell.owner != Cell.Owner.None) {
+            return false;
+        }
+
+        if (cell.owner == Cell.Owner.None || cell.owner == player) {
+            cell.flagged = !cell.flagged;
+            cell.owner = player;
+            board.Draw(grid);
+            return true; // 插旗成功，消耗回合
+        }
+        
+        return false;
+    }
 
     // 占领/入侵逻辑
     private void CaptureCell(Cell.Owner player, Cell cell)
@@ -311,26 +380,26 @@ private void Chord(Cell center)
 
     // 释放并尝试翻开周围
 // 修改后：传入操作者和目标中心格
-private void Unchord(Cell.Owner player, Cell center)
+private bool Unchord(Cell.Owner player, Cell center)
 {
-    // 1. 基础检查
     if (center == null || !center.revealed || center.type != Cell.Type.Number) {
-        ClearAllChordedFlags(); // 辅助函数：清空所有格子的 chorded 状态
-        return;
+        ClearAllChordedFlags();
+        return false;
     }
 
-    // 2. 逻辑判定：周围旗帜数是否等于数字格的数值
+    bool anyChange = false;
+
     if (grid.CountAdjacentFlags(center) >= center.number)
     {
-        // 3. 尝试翻开周围 8 格
         for (int adjacentX = -1; adjacentX <= 1; adjacentX++) {
             for (int adjacentY = -1; adjacentY <= 1; adjacentY++) {
                 if (adjacentX == 0 && adjacentY == 0) continue;
 
                 if (grid.TryGetCell(center.position.x + adjacentX, center.position.y + adjacentY, out Cell cell)) {
-                    // 核心调用：调用带参数的 Reveal
-                    // 这样通过 Chord 翻开的领地也会正确归属于当前玩家，并检查雷
-                    Reveal(player, cell);
+                    // 递归调用 Reveal，只要有一个成功，就算动作有效
+                    if (Reveal(player, cell)) {
+                        anyChange = true;
+                    }
                 }
             }
         }
@@ -338,9 +407,9 @@ private void Unchord(Cell.Owner player, Cell center)
 
     ClearAllChordedFlags();
     board.Draw(grid);
+    return anyChange; // 如果周围有格子被翻开，则消耗回合
 }
 
-// 辅助函数，避免代码重复
 private void ClearAllChordedFlags()
 {
     for (int x = 0; x < width; x++) {
@@ -398,17 +467,13 @@ private IEnumerator Flood(Cell cell, Cell.Owner player)
     // 如果当前格是“数字格”，逻辑到此为止，不再进入上面的 if，也就停止了扩散。
 }
 
-    private void Explode(Cell cell)
+    private void RevealAllMines()
     {
-        // 目前暂定踩雷结束，后续可改为扣除基地血量
-        gameover = true;
-        cell.exploded = true;
-        cell.revealed = true;
-
-        // 显示所有雷
         for (int x = 0; x < width; x++) {
             for (int y = 0; y < height; y++) {
-                if (grid[x, y].type == Cell.Type.Mine) grid[x, y].revealed = true;
+                if (grid[x, y].type == Cell.Type.Mine) {
+                    grid[x, y].revealed = true;
+                }
             }
         }
         board.Draw(grid);
@@ -459,6 +524,60 @@ private IEnumerator Flood(Cell cell, Cell.Owner player)
             if (energySliderB) energySliderB.value = energyB;
             if (energyTextB) energyTextB.text = $"P2 Energy: {energyB}/{maxEnergy}";
         }
+    }
+
+    private void UpdateHealthUI(Cell.Owner player)
+{
+    if (player == Cell.Owner.PlayerA)
+    {
+        if (hpSliderA) hpSliderA.value = (float)healthA / maxHealth; // 假设Slider是0-1
+        if (hpTextA) hpTextA.text = $"HP: {healthA}";
+    }
+    else if (player == Cell.Owner.PlayerB)
+    {
+        if (hpSliderB) hpSliderB.value = (float)healthB / maxHealth;
+        if (hpTextB) hpTextB.text = $"HP: {healthB}";
+    }
+}
+
+// 核心扣血逻辑
+    private void TakeDamage(Cell.Owner player, int amount)
+    {
+        if (gameover) return;
+
+        if (player == Cell.Owner.PlayerA)
+        {
+            healthA -= amount;
+            UpdateHealthUI(Cell.Owner.PlayerA);
+            
+            if (healthA <= 0)
+            {
+                healthA = 0;
+                Debug.Log("P1 血量耗尽，P2 获胜！");
+                GameOver(Cell.Owner.PlayerB); // 传入获胜者
+            }
+        }
+        else if (player == Cell.Owner.PlayerB)
+        {
+            healthB -= amount;
+            UpdateHealthUI(Cell.Owner.PlayerB);
+
+            if (healthB <= 0)
+            {
+                healthB = 0;
+                Debug.Log("P2 血量耗尽，P1 获胜！");
+                GameOver(Cell.Owner.PlayerA); // 传入获胜者
+            }
+        }
+    }
+
+        private void GameOver(Cell.Owner winner)
+    {
+        gameover = true;
+        RevealAllMines();
+        // 这里可以添加显示胜利面板的逻辑
+        // 比如：winText.text = $"{winner} Wins!";
+        Debug.Log($"游戏结束，获胜者：{winner}");
     }
 
     #endregion
