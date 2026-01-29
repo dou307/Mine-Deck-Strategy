@@ -51,6 +51,12 @@ public class Game : MonoBehaviour
 
     [Header("竞技设置")]
 
+    public int maxTowersPerPlayer = 10; 
+    
+    // --- 新增：内部计数器 ---
+    private int towerCountA = 0;
+    private int towerCountB = 0;
+
     public Vector2Int p2CursorPos = new Vector2Int(31, 15); // P2 初始位置（比如右上角）
     public Transform p2CursorVisual; // 在编辑器里拖入一个高亮方框，显示P2在哪
     public float occupationLockTime = 3.0f; // 领地占领锁定时间
@@ -85,6 +91,9 @@ public class Game : MonoBehaviour
     // 4. 创建新的逻辑网格并让渲染层重绘
     grid = new CellGrid(width, height);
     board.Draw(grid);
+
+    towerCountA = 0;
+    towerCountB = 0;
 
     // 5. 【核心修改】重置双方玩家的能量值
     energyA = 0;
@@ -309,6 +318,40 @@ private Cell GetMouseCell()
             return false;
         }
 
+         // =========================================================
+        //  新增检查 A：数量限制
+        // =========================================================
+        int currentCount = (player == Cell.Owner.PlayerA) ? towerCountA : towerCountB;
+        if (currentCount >= maxTowersPerPlayer)
+        {
+            Debug.Log($"无法建造！防御塔数量已达上限 ({currentCount}/{maxTowersPerPlayer})");
+            return false; // 不扣能量，不扣回合，直接拒绝
+        }
+
+        // =========================================================
+        //  新增检查 B：地域限制 (左上到右下分界线)
+        //  公式：x * H + y * W  vs  W * H
+        // =========================================================
+        long posValue = (long)cell.position.x * height + (long)cell.position.y * width;
+        long threshold = (long)width * height;
+        
+        // P1 位于左下角 (0,0)，值应该 小于 阈值
+        if (player == Cell.Owner.PlayerA)
+        {
+            if (posValue >= threshold) {
+                Debug.Log("无法建造！该区域属于敌方半场 (越过分界线)。");
+                return false;
+            }
+        }
+        // P2 位于右上角 (W,H)，值应该 大于 阈值
+        else if (player == Cell.Owner.PlayerB)
+        {
+            if (posValue <= threshold) {
+                Debug.Log("无法建造！该区域属于敌方半场 (越过分界线)。");
+                return false;
+            }
+        }
+
         // 4. 【能量检查】
         int currentEnergy = (player == Cell.Owner.PlayerA) ? energyA : energyB;
         if (currentEnergy < buildTowerCost) {
@@ -336,9 +379,6 @@ private Cell GetMouseCell()
 
         if (isMine)
         {
-            // 如果是 别人已经炸开的雷，是否允许抢夺？
-            // 你的需求说：“可以在己方已经炸开的雷上建塔”。
-            // 隐含的意思是：敌方炸开的雷不能直接建塔（因为那是敌人的领地/得分）。
             
             bool canBuildOnExploded = cell.exploded && cell.owner == player;
             bool isHidden = !cell.revealed; // 包含插旗状态
@@ -352,16 +392,17 @@ private Cell GetMouseCell()
                 
                 // 塔本身就代表了视野，所以设为 revealed
                 cell.revealed = true; 
+
+                if (player == Cell.Owner.PlayerA) towerCountA++;
+                else towerCountB++;
                 
                 // 塔覆盖在雷上，不再视为“爆炸”状态，而是“防御”状态
                 // (虽然实际上它还是雷，但视觉上塔优先)
                 
-                Debug.Log($"玩家 {player} 建塔成功！消耗 {buildTowerCost} 能量。");
+                Debug.Log($"玩家 {player} 建塔成功！当前塔数: {(player == Cell.Owner.PlayerA ? towerCountA : towerCountB)}/{maxTowersPerPlayer}");
             }
             else
             {
-                // 试图在敌人炸开的雷上建塔 -> 视为无效操作但已扣能量（或者视为失败）
-                // 为了简单，这里算作操作失败，但不扣血，只浪费能量和回合
                 Debug.Log("建塔失败：不能在敌方领地建塔。");
             }
         }
@@ -377,8 +418,8 @@ private Cell GetMouseCell()
 
             // 【关键博弈设计】
             // 既然建塔失败了，要不要翻开这个格子告诉大家这里是安全的？
-            // 通常为了增加惩罚力度，**不翻开**。
-            // 这样玩家亏了血、亏了能量、亏了回合，而且还不知道这个格子到底是数字几。
+            // 不翻开
+            // 玩家亏了血、亏了能量、亏了回合，而且还不知道这个格子到底是数字几。
             // cell.revealed = false; // 保持原样
         }
 
