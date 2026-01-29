@@ -20,6 +20,9 @@ public class Game : MonoBehaviour
      [Header("血量系统")]
     public int maxHealth = 100;
     public int damagePerMine = 5;
+
+    public int damageTowerDirect = 10; // 直接点塔扣10血
+    public int damageTowerAOE = 3;     // 在塔周围扣3血
     
     // 玩家 A 血量
     public int healthA = 100;
@@ -31,12 +34,10 @@ public class Game : MonoBehaviour
     public UnityEngine.UI.Slider hpSliderB;
     public TMPro.TextMeshProUGUI hpTextB;
 
-    [Header("能量系统 - 玩家 A (红)")]
+    [Header("能量系统")]
     public int energyA = 0;
     public UnityEngine.UI.Slider energySliderA;
     public TMPro.TextMeshProUGUI energyTextA;
-
-    [Header("能量系统 - 玩家 B (蓝)")]
     public int energyB = 0;
     public UnityEngine.UI.Slider energySliderB;
     public TMPro.TextMeshProUGUI energyTextB;
@@ -439,8 +440,32 @@ private Cell GetMouseCell()
             return false; // 操作无效，不切换回合
         }
 
-         // 有塔也不能翻开（或者有塔算作已保护？暂时逻辑：有塔无法被普通翻开覆盖）
-        if (cell.hasTower) return false;
+         bool isDirectEnemyTower = (cell.hasTower && cell.towerOwner != player);
+        bool isCapturable = (cell.owner != Cell.Owner.None && cell.owner != player);
+        bool isHidden = !cell.revealed; // 包括插旗状态
+
+        // 如果格子已经是翻开的，且不是敌方领地（能抢）也不是敌方塔（能打）
+        // 那这就是个纯粹的误触（比如点到了自己地盘上的数字 1）
+        // 这种情况下：不扣血，不消耗回合，直接退出
+        if (!isHidden && !isCapturable && !isDirectEnemyTower)
+        {
+            return false;
+        }
+
+        int defenseDamage = CheckAndApplyTowerDefense(player, cell);
+
+        if (isDirectEnemyTower)
+        {
+            // 既然已经扣了 10 滴血 (在 CheckAndApplyTowerDefense 里处理了)
+            // 这算作一次有效回合（为了惩罚玩家的误操作或自杀式攻击）
+            // 返回 true 会触发 SwitchTurn
+            return true; 
+        }
+
+        // 如果是己方防御塔，还是不能操作，但不扣血，也不消耗回合（相当于无效点击）
+        if (cell.hasTower && cell.towerOwner == player) {
+            return false;
+        }
 
         // 地图生成
         if (!generated) {
@@ -452,13 +477,15 @@ private Cell GetMouseCell()
         bool actionTaken = false;
 
         // 分流逻辑
-        if (cell.owner != Cell.Owner.None && cell.owner != player) {
+        if (isCapturable) {
             CaptureCell(player, cell);
             actionTaken = true; // 发生了入侵，算一回合
         } else {
             // 如果 ExecuteReveal 真的做了什么，才算一回合
             actionTaken = ExecuteReveal(player, cell); 
         }
+
+        if (defenseDamage > 0) actionTaken = true;
 
         board.Draw(grid);
         return actionTaken;
@@ -771,6 +798,55 @@ private IEnumerator Flood(Cell cell, Cell.Owner player)
                 GameOver(Cell.Owner.PlayerA); // 传入获胜者
             }
         }
+    }
+
+// --- 新增：检查并应用防御塔防御伤害 ---
+    // 返回值：造成的总伤害量（用于调试或判断）
+    private int CheckAndApplyTowerDefense(Cell.Owner attacker, Cell targetCell)
+    {
+        int totalDamage = 0;
+        Cell.Owner enemy = (attacker == Cell.Owner.PlayerA) ? Cell.Owner.PlayerB : Cell.Owner.PlayerA;
+
+        // 1. 判定是否直接点击了敌方防御塔
+        if (targetCell.hasTower && targetCell.towerOwner == enemy)
+        {
+            totalDamage += damageTowerDirect;
+            Debug.Log($"<color=red>警告：直接攻击敌方防御塔！受到 {damageTowerDirect} 点反噬伤害！</color>");
+        }
+
+        // 2. 判定是否在敌方防御塔的 3x3 范围内 (AOE)
+        // 遍历周围 8 个格子
+        for (int x = -1; x <= 1; x++)
+        {
+            for (int y = -1; y <= 1; y++)
+            {
+                // 跳过中心点 (中心点如果是塔，上面第1步已经算过直接伤害了，或者中心点不是塔)
+                if (x == 0 && y == 0) continue;
+
+                int checkX = targetCell.position.x + x;
+                int checkY = targetCell.position.y + y;
+
+                if (grid.TryGetCell(checkX, checkY, out Cell neighbor))
+                {
+                    // 如果邻居有塔，且是敌人的塔
+                    if (neighbor.hasTower && neighbor.towerOwner == enemy)
+                    {
+                        totalDamage += damageTowerAOE;
+                        // 这里采用了“叠加”机制：如果站在两个塔的重叠范围，会扣 3+3=6 血
+                        // 如果想只扣一次，可以在这里 break; 
+                    }
+                }
+            }
+        }
+
+        // 3. 如果产生了伤害，执行扣血
+        if (totalDamage > 0)
+        {
+            TakeDamage(attacker, totalDamage);
+            Debug.Log($"受到防御塔防御机制伤害：{totalDamage} 点");
+        }
+
+        return totalDamage;
     }
 
         private void GameOver(Cell.Owner winner)
