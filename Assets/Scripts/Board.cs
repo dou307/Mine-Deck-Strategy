@@ -20,6 +20,9 @@ public class Board : MonoBehaviour
     public Tile tileNum7;
     public Tile tileNum8;
 
+    public Tile tileRedTower;
+    public Tile tileBlueTower;
+
     //定义玩家颜色
     public Color colorPlayerA = new Color(1f, 0.5f, 0.5f);//淡红色
     public Color colorPlayerB = new Color(0.5f, 0.5f, 1f);//淡蓝色
@@ -60,8 +63,13 @@ public class Board : MonoBehaviour
         }
     }
 
-    private Tile GetTile(Cell cell)
+     private Tile GetTile(Cell cell)
     {
+        // --- 新增：防御塔渲染优先级最高 ---
+        if (cell.hasTower) {
+            return cell.towerOwner == Cell.Owner.PlayerA ? tileRedTower : tileBlueTower;
+        }
+
         if (cell.revealed) {
             return GetRevealedTile(cell);
         } else if (cell.flagged) {

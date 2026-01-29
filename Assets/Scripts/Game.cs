@@ -20,6 +20,9 @@ public class Game : MonoBehaviour
      [Header("血量系统")]
     public int maxHealth = 100;
     public int damagePerMine = 5;
+
+    public int damageTowerDirect = 10; // 直接点塔扣10血
+    public int damageTowerAOE = 3;     // 在塔周围扣3血
     
     // 玩家 A 血量
     public int healthA = 100;
@@ -31,12 +34,10 @@ public class Game : MonoBehaviour
     public UnityEngine.UI.Slider hpSliderB;
     public TMPro.TextMeshProUGUI hpTextB;
 
-    [Header("能量系统 - 玩家 A (红)")]
+    [Header("能量系统")]
     public int energyA = 0;
     public UnityEngine.UI.Slider energySliderA;
     public TMPro.TextMeshProUGUI energyTextA;
-
-    [Header("能量系统 - 玩家 B (蓝)")]
     public int energyB = 0;
     public UnityEngine.UI.Slider energySliderB;
     public TMPro.TextMeshProUGUI energyTextB;
@@ -44,11 +45,25 @@ public class Game : MonoBehaviour
     [Header("能量通用设置")]
     public int maxEnergy = 100;
     public int energyPerCell = 5;
+
+    public int buildTowerCost = 5; 
+
+    public int buildTowerPenaltyDamage = 3;
+
     [Header("竞技设置")]
+
+    public int maxTowersPerPlayer = 10; 
+    
+    // --- 新增：内部计数器 ---
+    private int towerCountA = 0;
+    private int towerCountB = 0;
 
     public Vector2Int p2CursorPos = new Vector2Int(31, 15); // P2 初始位置（比如右上角）
     public Transform p2CursorVisual; // 在编辑器里拖入一个高亮方框，显示P2在哪
     public float occupationLockTime = 3.0f; // 领地占领锁定时间
+
+    public float moveRepeatRate = 0.15f; // 长按时每隔多少秒移动一格
+    private float _nextMoveTime = 0f;    // 计时器
 
     private Board board;
     private CellGrid grid;
@@ -78,6 +93,9 @@ public class Game : MonoBehaviour
     grid = new CellGrid(width, height);
     board.Draw(grid);
 
+    towerCountA = 0;
+    towerCountB = 0;
+
     // 5. 【核心修改】重置双方玩家的能量值
     energyA = 0;
     energyB = 0;
@@ -91,6 +109,13 @@ public class Game : MonoBehaviour
     healthB = maxHealth;
     UpdateHealthUI(Cell.Owner.PlayerA);
     UpdateHealthUI(Cell.Owner.PlayerB);
+
+     p2CursorPos = new Vector2Int(width - 1, height - 1); 
+
+    if (p2CursorVisual != null) {
+        Vector3 worldPos = board.tilemap.CellToWorld((Vector3Int)p2CursorPos);
+        p2CursorVisual.position = worldPos + new Vector3(0.5f, 0.5f, 0);
+    }
 
     // --- 新增代码：重置回合 ---
     currentTurn = Cell.Owner.PlayerA;
@@ -172,7 +197,6 @@ private Cell GetMouseCell()
 
 #region 输入处理 (Input Handling)
 
-    // 玩家 1：完全基于鼠标，传入鼠标当前的格子
     private void HandleP1MouseInput(Cell.Owner player)
     {
         if (currentTurn != player) return;// 如果不是 P1 的回合，直接退出，禁止操作
@@ -184,11 +208,14 @@ private Cell GetMouseCell()
         // 尝试翻开，如果成功翻开/占领，内部会切换回合
             if (Reveal(player, targetCell)) SwitchTurn(); 
         } else if (Input.GetMouseButtonDown(1)) {
-            if (Flag(player, targetCell)) SwitchTurn();
+            Flag(player, targetCell);
         } else if (Input.GetMouseButton(2)) {
             Chord(targetCell); // 预览不消耗回合
         } else if (Input.GetMouseButtonUp(2)) {
             if (Unchord(player, targetCell)) SwitchTurn();
+        }
+        else if (Input.GetKeyDown(KeyCode.T)) {
+            if (BuildTower(player, targetCell)) SwitchTurn();
         }
     }
 
@@ -213,12 +240,15 @@ private Cell GetMouseCell()
         if (Input.GetKeyDown(KeyCode.Space)) {
             if (Reveal(player, targetCell)) SwitchTurn();
         } else if (Input.GetKeyDown(KeyCode.F)) {
-            if (Flag(player, targetCell)) SwitchTurn();
+            Flag(player, targetCell);
         } 
         else if (Input.GetKeyDown(KeyCode.E)) {
             Chord(targetCell);
         } else if (Input.GetKeyUp(KeyCode.E)) {
             if (Unchord(player, targetCell)) SwitchTurn();
+        }
+        else if (Input.GetKeyDown(KeyCode.T)) {
+            if (BuildTower(player, targetCell)) SwitchTurn();
         }
     }
 
@@ -226,20 +256,178 @@ private Cell GetMouseCell()
     private void HandleP2CursorMovement()
     {
         Vector2Int move = Vector2Int.zero;
-        if (Input.GetKeyDown(KeyCode.W)) move.y += 1;
-        if (Input.GetKeyDown(KeyCode.S)) move.y -= 1;
-        if (Input.GetKeyDown(KeyCode.A)) move.x -= 1;
-        if (Input.GetKeyDown(KeyCode.D)) move.x += 1;
+        bool isInputActive = false;
 
-        if (move != Vector2Int.zero) {
-            p2CursorPos.x = Mathf.Clamp(p2CursorPos.x + move.x, 0, width - 1);
-            p2CursorPos.y = Mathf.Clamp(p2CursorPos.y + move.y, 0, height - 1);
+        // 使用 GetKey 而不是 GetKeyDown 来检测长按
+        // 同时也保留 GetKeyDown 的即时响应（可选，这里为了简单直接用计时器逻辑）
+        
+        if (Input.GetKey(KeyCode.W)) { move.y += 1; isInputActive = true; }
+        else if (Input.GetKey(KeyCode.S)) { move.y -= 1; isInputActive = true; }
+        
+        // 使用 else if 防止斜向移动（如果想要斜向移动，去掉 else）
+        if (Input.GetKey(KeyCode.A)) { move.x -= 1; isInputActive = true; }
+        else if (Input.GetKey(KeyCode.D)) { move.x += 1; isInputActive = true; }
+
+        // 只有当有输入 且 当前时间超过了下一次允许移动的时间
+        if (isInputActive && Time.time >= _nextMoveTime)
+        {
+            if (move != Vector2Int.zero)
+            {
+                // 移动光标
+                p2CursorPos.x = Mathf.Clamp(p2CursorPos.x + move.x, 0, width - 1);
+                p2CursorPos.y = Mathf.Clamp(p2CursorPos.y + move.y, 0, height - 1);
+                
+                // 只有真正发生了移动才重置计时器
+                // 这里还可以加一个小技巧：如果是刚按下(GetKeyDown)，延迟稍微长一点(0.3s)，
+                // 之后的连续移动(GetKey)快一点(0.1s)，手感会更好。这里先用统一速度。
+                _nextMoveTime = Time.time + moveRepeatRate;
+            }
+        }
+        
+        // 如果没有任何按键按下，重置计时器，保证下次按下能立刻响应
+        if (!isInputActive)
+        {
+            _nextMoveTime = 0f;
         }
     }
 
     #endregion
 
     #region 核心动作 (Actions)
+
+        // --- 新增：建塔逻辑 ---
+ private bool BuildTower(Cell.Owner player, Cell cell)
+    {
+        if (cell == null) return false;
+
+        // 1. 【前置检查】被锁定的格子不能操作（除非是自己的）
+        if (cell.lockTimer > 0 && cell.owner != player && cell.owner != Cell.Owner.None) {
+            Debug.Log("该区域被锁定，无法建塔！");
+            return false;
+        }
+
+        // 2. 【前置检查】已经有塔的位置不能再建
+        if (cell.hasTower) {
+            Debug.Log("这里已经有一座防御塔了！");
+            return false;
+        }
+
+        // 3. 【前置检查】已翻开的“安全格/数字格”不能建塔
+        // (既然已经知道不是雷了，建塔没有意义，防止误触浪费能量)
+        if (cell.revealed && cell.type != Cell.Type.Mine) {
+            Debug.Log("目标是已知安全区，无法建塔。");
+            return false;
+        }
+
+         // =========================================================
+        //  新增检查 A：数量限制
+        // =========================================================
+        int currentCount = (player == Cell.Owner.PlayerA) ? towerCountA : towerCountB;
+        if (currentCount >= maxTowersPerPlayer)
+        {
+            Debug.Log($"无法建造！防御塔数量已达上限 ({currentCount}/{maxTowersPerPlayer})");
+            return false; // 不扣能量，不扣回合，直接拒绝
+        }
+
+        // =========================================================
+        //  新增检查 B：地域限制 (左上到右下分界线)
+        //  公式：x * H + y * W  vs  W * H
+        // =========================================================
+        long posValue = (long)cell.position.x * height + (long)cell.position.y * width;
+        long threshold = (long)width * height;
+        
+        // P1 位于左下角 (0,0)，值应该 小于 阈值
+        if (player == Cell.Owner.PlayerA)
+        {
+            if (posValue >= threshold) {
+                Debug.Log("无法建造！该区域属于敌方半场 (越过分界线)。");
+                return false;
+            }
+        }
+        // P2 位于右上角 (W,H)，值应该 大于 阈值
+        else if (player == Cell.Owner.PlayerB)
+        {
+            if (posValue <= threshold) {
+                Debug.Log("无法建造！该区域属于敌方半场 (越过分界线)。");
+                return false;
+            }
+        }
+
+        // 4. 【能量检查】
+        int currentEnergy = (player == Cell.Owner.PlayerA) ? energyA : energyB;
+        if (currentEnergy < buildTowerCost) {
+            Debug.Log($"能量不足 ({currentEnergy}/{buildTowerCost})，无法建塔！");
+            return false;
+        }
+
+        // ============================================================
+        //  从这里开始，操作被视为“已确认执行”
+        //  无论结果是成功还是失败，都要扣能量、算回合
+        // ============================================================
+
+        // 5. 扣除能量
+        AddEnergy(player, -buildTowerCost);
+
+        // 6. 判定逻辑
+        bool isMine = (cell.type == Cell.Type.Mine);
+        
+        // 允许建塔的两种情况：
+        // A. 格子未翻开 (未知状态 或 插旗状态) -> 盲狙
+        // B. 格子已炸开 (必须是雷) 且 归属于自己 -> 巩固防线
+        
+        // 注意：这里我们重新定义一下，只有未翻开的雷，或者己方炸开的雷算作“成功”
+        // 如果是“未翻开的非雷”，则算失败。
+
+        if (isMine)
+        {
+            
+            bool canBuildOnExploded = cell.exploded && cell.owner == player;
+            bool isHidden = !cell.revealed; // 包含插旗状态
+
+            if (isHidden || canBuildOnExploded)
+            {
+                // --- 建塔成功 ---
+                cell.hasTower = true;
+                cell.towerOwner = player;
+                cell.owner = player; // 强行夺取领地权
+                
+                // 塔本身就代表了视野，所以设为 revealed
+                cell.revealed = true; 
+
+                if (player == Cell.Owner.PlayerA) towerCountA++;
+                else towerCountB++;
+                
+                // 塔覆盖在雷上，不再视为“爆炸”状态，而是“防御”状态
+                // (虽然实际上它还是雷，但视觉上塔优先)
+                
+                Debug.Log($"玩家 {player} 建塔成功！当前塔数: {(player == Cell.Owner.PlayerA ? towerCountA : towerCountB)}/{maxTowersPerPlayer}");
+            }
+            else
+            {
+                Debug.Log("建塔失败：不能在敌方领地建塔。");
+            }
+        }
+        else
+        {
+            // --- 建塔失败 (目标不是雷) ---
+            // 既然能过前面的检查，说明这里是 isHidden (未翻开) 的非雷格子
+            
+            Debug.Log($">>> 建塔失误！目标下方空空如也！受到 {buildTowerPenaltyDamage} 点反噬伤害！ <<<");
+            
+            // 扣血
+            TakeDamage(player, buildTowerPenaltyDamage);
+
+            // 【关键博弈设计】
+            // 既然建塔失败了，要不要翻开这个格子告诉大家这里是安全的？
+            // 不翻开
+            // 玩家亏了血、亏了能量、亏了回合，而且还不知道这个格子到底是数字几。
+            // cell.revealed = false; // 保持原样
+        }
+
+        // 7. 刷新画面并结束回合
+        board.Draw(grid);
+        return true; 
+    }
 
     // 翻开/占领逻辑
     private bool Reveal(Cell.Owner player, Cell cell) 
@@ -252,6 +440,33 @@ private Cell GetMouseCell()
             return false; // 操作无效，不切换回合
         }
 
+         bool isDirectEnemyTower = (cell.hasTower && cell.towerOwner != player);
+        bool isCapturable = (cell.owner != Cell.Owner.None && cell.owner != player);
+        bool isHidden = !cell.revealed; // 包括插旗状态
+
+        // 如果格子已经是翻开的，且不是敌方领地（能抢）也不是敌方塔（能打）
+        // 那这就是个纯粹的误触（比如点到了自己地盘上的数字 1）
+        // 这种情况下：不扣血，不消耗回合，直接退出
+        if (!isHidden && !isCapturable && !isDirectEnemyTower)
+        {
+            return false;
+        }
+
+        int defenseDamage = CheckAndApplyTowerDefense(player, cell);
+
+        if (isDirectEnemyTower)
+        {
+            // 既然已经扣了 10 滴血 (在 CheckAndApplyTowerDefense 里处理了)
+            // 这算作一次有效回合（为了惩罚玩家的误操作或自杀式攻击）
+            // 返回 true 会触发 SwitchTurn
+            return true; 
+        }
+
+        // 如果是己方防御塔，还是不能操作，但不扣血，也不消耗回合（相当于无效点击）
+        if (cell.hasTower && cell.towerOwner == player) {
+            return false;
+        }
+
         // 地图生成
         if (!generated) {
             grid.GenerateMines(cell, mineCount);
@@ -262,13 +477,15 @@ private Cell GetMouseCell()
         bool actionTaken = false;
 
         // 分流逻辑
-        if (cell.owner != Cell.Owner.None && cell.owner != player) {
+        if (isCapturable) {
             CaptureCell(player, cell);
             actionTaken = true; // 发生了入侵，算一回合
         } else {
             // 如果 ExecuteReveal 真的做了什么，才算一回合
             actionTaken = ExecuteReveal(player, cell); 
         }
+
+        if (defenseDamage > 0) actionTaken = true;
 
         board.Draw(grid);
         return actionTaken;
@@ -314,24 +531,19 @@ private Cell GetMouseCell()
         return true;
     }
 
-    private bool Flag(Cell.Owner player, Cell cell)
+    private void Flag(Cell.Owner player, Cell cell)
     {
-        if (cell == null) return false;
-        if (cell.revealed) return false;
+        if (cell == null) return;
+        if (cell.revealed) return; // 翻开了不能插旗
+        if (cell.hasTower) return; // 有塔了不需要插旗
 
-        // 锁定检查
-        if (cell.lockTimer > 0 && cell.owner != player && cell.owner != Cell.Owner.None) {
-            return false;
-        }
-
+        // 只有无主地或者自己的地可以插旗/取消旗
         if (cell.owner == Cell.Owner.None || cell.owner == player) {
             cell.flagged = !cell.flagged;
-            cell.owner = player;
+            // 插旗不改变 owner，保持 None 或 Player
+            // 也不消耗回合
             board.Draw(grid);
-            return true; // 插旗成功，消耗回合
         }
-        
-        return false;
     }
 
     // 占领/入侵逻辑
@@ -370,7 +582,7 @@ private void Chord(Cell center)
         for (int adjacentY = -1; adjacentY <= 1; adjacentY++) {
             if (grid.TryGetCell(center.position.x + adjacentX, center.position.y + adjacentY, out Cell cell)) {
                 // 只有没翻开且没插旗的格子才显示“下沉/高亮”效果
-                cell.chorded = !cell.revealed && !cell.flagged;
+                cell.chorded = !cell.revealed && !cell.flagged && !cell.hasTower;
             }
         }
     }
@@ -389,7 +601,7 @@ private bool Unchord(Cell.Owner player, Cell center)
 
     bool anyChange = false;
 
-    if (grid.CountAdjacentFlags(center) >= center.number)
+    if (CountAdjacentFlagsAndTowers(center) >= center.number)
     {
         for (int adjacentX = -1; adjacentX <= 1; adjacentX++) {
             for (int adjacentY = -1; adjacentY <= 1; adjacentY++) {
@@ -410,6 +622,23 @@ private bool Unchord(Cell.Owner player, Cell center)
     return anyChange; // 如果周围有格子被翻开，则消耗回合
 }
 
+// 辅助计算周围旗子和塔
+    private int CountAdjacentFlagsAndTowers(Cell cell)
+    {
+        int count = 0;
+        for (int x = -1; x <= 1; x++) {
+            for (int y = -1; y <= 1; y++) {
+                if (x == 0 && y == 0) continue;
+                if (grid.TryGetCell(cell.position.x + x, cell.position.y + y, out Cell neighbor)) {
+                    // 如果是没翻开且插旗了 OR 已经建塔了，都算作“雷”
+                    if ((!neighbor.revealed && neighbor.flagged) || neighbor.hasTower) {
+                        count++;
+                    }
+                }
+            }
+        }
+        return count;
+    }
 private void ClearAllChordedFlags()
 {
     for (int x = 0; x < width; x++) {
@@ -569,6 +798,55 @@ private IEnumerator Flood(Cell cell, Cell.Owner player)
                 GameOver(Cell.Owner.PlayerA); // 传入获胜者
             }
         }
+    }
+
+// --- 新增：检查并应用防御塔防御伤害 ---
+    // 返回值：造成的总伤害量（用于调试或判断）
+    private int CheckAndApplyTowerDefense(Cell.Owner attacker, Cell targetCell)
+    {
+        int totalDamage = 0;
+        Cell.Owner enemy = (attacker == Cell.Owner.PlayerA) ? Cell.Owner.PlayerB : Cell.Owner.PlayerA;
+
+        // 1. 判定是否直接点击了敌方防御塔
+        if (targetCell.hasTower && targetCell.towerOwner == enemy)
+        {
+            totalDamage += damageTowerDirect;
+            Debug.Log($"<color=red>警告：直接攻击敌方防御塔！受到 {damageTowerDirect} 点反噬伤害！</color>");
+        }
+
+        // 2. 判定是否在敌方防御塔的 3x3 范围内 (AOE)
+        // 遍历周围 8 个格子
+        for (int x = -1; x <= 1; x++)
+        {
+            for (int y = -1; y <= 1; y++)
+            {
+                // 跳过中心点 (中心点如果是塔，上面第1步已经算过直接伤害了，或者中心点不是塔)
+                if (x == 0 && y == 0) continue;
+
+                int checkX = targetCell.position.x + x;
+                int checkY = targetCell.position.y + y;
+
+                if (grid.TryGetCell(checkX, checkY, out Cell neighbor))
+                {
+                    // 如果邻居有塔，且是敌人的塔
+                    if (neighbor.hasTower && neighbor.towerOwner == enemy)
+                    {
+                        totalDamage += damageTowerAOE;
+                        // 这里采用了“叠加”机制：如果站在两个塔的重叠范围，会扣 3+3=6 血
+                        // 如果想只扣一次，可以在这里 break; 
+                    }
+                }
+            }
+        }
+
+        // 3. 如果产生了伤害，执行扣血
+        if (totalDamage > 0)
+        {
+            TakeDamage(attacker, totalDamage);
+            Debug.Log($"受到防御塔防御机制伤害：{totalDamage} 点");
+        }
+
+        return totalDamage;
     }
 
         private void GameOver(Cell.Owner winner)
