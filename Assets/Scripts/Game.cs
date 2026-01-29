@@ -50,6 +50,9 @@ public class Game : MonoBehaviour
     public Transform p2CursorVisual; // 在编辑器里拖入一个高亮方框，显示P2在哪
     public float occupationLockTime = 3.0f; // 领地占领锁定时间
 
+    public float moveRepeatRate = 0.15f; // 长按时每隔多少秒移动一格
+    private float _nextMoveTime = 0f;    // 计时器
+
     private Board board;
     private CellGrid grid;
     private bool gameover;
@@ -91,6 +94,13 @@ public class Game : MonoBehaviour
     healthB = maxHealth;
     UpdateHealthUI(Cell.Owner.PlayerA);
     UpdateHealthUI(Cell.Owner.PlayerB);
+
+     p2CursorPos = new Vector2Int(width - 1, height - 1); 
+
+    if (p2CursorVisual != null) {
+        Vector3 worldPos = board.tilemap.CellToWorld((Vector3Int)p2CursorPos);
+        p2CursorVisual.position = worldPos + new Vector3(0.5f, 0.5f, 0);
+    }
 
     // --- 新增代码：重置回合 ---
     currentTurn = Cell.Owner.PlayerA;
@@ -226,14 +236,38 @@ private Cell GetMouseCell()
     private void HandleP2CursorMovement()
     {
         Vector2Int move = Vector2Int.zero;
-        if (Input.GetKeyDown(KeyCode.W)) move.y += 1;
-        if (Input.GetKeyDown(KeyCode.S)) move.y -= 1;
-        if (Input.GetKeyDown(KeyCode.A)) move.x -= 1;
-        if (Input.GetKeyDown(KeyCode.D)) move.x += 1;
+        bool isInputActive = false;
 
-        if (move != Vector2Int.zero) {
-            p2CursorPos.x = Mathf.Clamp(p2CursorPos.x + move.x, 0, width - 1);
-            p2CursorPos.y = Mathf.Clamp(p2CursorPos.y + move.y, 0, height - 1);
+        // 使用 GetKey 而不是 GetKeyDown 来检测长按
+        // 同时也保留 GetKeyDown 的即时响应（可选，这里为了简单直接用计时器逻辑）
+        
+        if (Input.GetKey(KeyCode.W)) { move.y += 1; isInputActive = true; }
+        else if (Input.GetKey(KeyCode.S)) { move.y -= 1; isInputActive = true; }
+        
+        // 使用 else if 防止斜向移动（如果想要斜向移动，去掉 else）
+        if (Input.GetKey(KeyCode.A)) { move.x -= 1; isInputActive = true; }
+        else if (Input.GetKey(KeyCode.D)) { move.x += 1; isInputActive = true; }
+
+        // 只有当有输入 且 当前时间超过了下一次允许移动的时间
+        if (isInputActive && Time.time >= _nextMoveTime)
+        {
+            if (move != Vector2Int.zero)
+            {
+                // 移动光标
+                p2CursorPos.x = Mathf.Clamp(p2CursorPos.x + move.x, 0, width - 1);
+                p2CursorPos.y = Mathf.Clamp(p2CursorPos.y + move.y, 0, height - 1);
+                
+                // 只有真正发生了移动才重置计时器
+                // 这里还可以加一个小技巧：如果是刚按下(GetKeyDown)，延迟稍微长一点(0.3s)，
+                // 之后的连续移动(GetKey)快一点(0.1s)，手感会更好。这里先用统一速度。
+                _nextMoveTime = Time.time + moveRepeatRate;
+            }
+        }
+        
+        // 如果没有任何按键按下，重置计时器，保证下次按下能立刻响应
+        if (!isInputActive)
+        {
+            _nextMoveTime = 0f;
         }
     }
 
