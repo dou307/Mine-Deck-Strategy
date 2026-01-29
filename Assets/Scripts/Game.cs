@@ -47,6 +47,8 @@ public class Game : MonoBehaviour
 
     public int buildTowerCost = 5; 
 
+    public int buildTowerPenaltyDamage = 3;
+
     [Header("竞技设置")]
 
     public Vector2Int p2CursorPos = new Vector2Int(31, 15); // P2 初始位置（比如右上角）
@@ -284,38 +286,105 @@ private Cell GetMouseCell()
     #region 核心动作 (Actions)
 
         // --- 新增：建塔逻辑 ---
-    private bool BuildTower(Cell.Owner player, Cell cell)
+ private bool BuildTower(Cell.Owner player, Cell cell)
     {
         if (cell == null) return false;
 
-        // 1. 检查能量是否足够 (如果不足5，操作无效，不扣回合)
-        int currentEnergy = (player == Cell.Owner.PlayerA) ? energyA : energyB;
-        if (currentEnergy < buildTowerCost) {
-            Debug.Log("能量不足，无法建造防御塔！");
+        // 1. 【前置检查】被锁定的格子不能操作（除非是自己的）
+        if (cell.lockTimer > 0 && cell.owner != player && cell.owner != Cell.Owner.None) {
+            Debug.Log("该区域被锁定，无法建塔！");
             return false;
         }
 
-        // 2. 消耗能量 (AddEnergy 传入负数即可扣除)
-        AddEnergy(player, -buildTowerCost);
-        Debug.Log($"玩家 {player} 消耗 {buildTowerCost} 能量尝试建塔...");
+        // 2. 【前置检查】已经有塔的位置不能再建
+        if (cell.hasTower) {
+            Debug.Log("这里已经有一座防御塔了！");
+            return false;
+        }
 
-        // 3. 判断建塔结果
-        // 规则：只能在地雷位置上建塔，且该位置不能已经有塔
-        // 注意：即使失败，能量已扣，且下面返回 true 代表消耗回合
-        if (cell.type == Cell.Type.Mine && !cell.hasTower)
+        // 3. 【前置检查】已翻开的“安全格/数字格”不能建塔
+        // (既然已经知道不是雷了，建塔没有意义，防止误触浪费能量)
+        if (cell.revealed && cell.type != Cell.Type.Mine) {
+            Debug.Log("目标是已知安全区，无法建塔。");
+            return false;
+        }
+
+        // 4. 【能量检查】
+        int currentEnergy = (player == Cell.Owner.PlayerA) ? energyA : energyB;
+        if (currentEnergy < buildTowerCost) {
+            Debug.Log($"能量不足 ({currentEnergy}/{buildTowerCost})，无法建塔！");
+            return false;
+        }
+
+        // ============================================================
+        //  从这里开始，操作被视为“已确认执行”
+        //  无论结果是成功还是失败，都要扣能量、算回合
+        // ============================================================
+
+        // 5. 扣除能量
+        AddEnergy(player, -buildTowerCost);
+
+        // 6. 判定逻辑
+        bool isMine = (cell.type == Cell.Type.Mine);
+        
+        // 允许建塔的两种情况：
+        // A. 格子未翻开 (未知状态 或 插旗状态) -> 盲狙
+        // B. 格子已炸开 (必须是雷) 且 归属于自己 -> 巩固防线
+        
+        // 注意：这里我们重新定义一下，只有未翻开的雷，或者己方炸开的雷算作“成功”
+        // 如果是“未翻开的非雷”，则算失败。
+
+        if (isMine)
         {
-            cell.hasTower = true;
-            cell.towerOwner = player;
-            cell.owner = player; // 塔也视为占领
-            Debug.Log(">>> 建塔成功！ <<<");
+            // 如果是 别人已经炸开的雷，是否允许抢夺？
+            // 你的需求说：“可以在己方已经炸开的雷上建塔”。
+            // 隐含的意思是：敌方炸开的雷不能直接建塔（因为那是敌人的领地/得分）。
+            
+            bool canBuildOnExploded = cell.exploded && cell.owner == player;
+            bool isHidden = !cell.revealed; // 包含插旗状态
+
+            if (isHidden || canBuildOnExploded)
+            {
+                // --- 建塔成功 ---
+                cell.hasTower = true;
+                cell.towerOwner = player;
+                cell.owner = player; // 强行夺取领地权
+                
+                // 塔本身就代表了视野，所以设为 revealed
+                cell.revealed = true; 
+                
+                // 塔覆盖在雷上，不再视为“爆炸”状态，而是“防御”状态
+                // (虽然实际上它还是雷，但视觉上塔优先)
+                
+                Debug.Log($"玩家 {player} 建塔成功！消耗 {buildTowerCost} 能量。");
+            }
+            else
+            {
+                // 试图在敌人炸开的雷上建塔 -> 视为无效操作但已扣能量（或者视为失败）
+                // 为了简单，这里算作操作失败，但不扣血，只浪费能量和回合
+                Debug.Log("建塔失败：不能在敌方领地建塔。");
+            }
         }
         else
         {
-            Debug.Log(">>> 建塔失败 (目标不是地雷或已有塔) <<<");
+            // --- 建塔失败 (目标不是雷) ---
+            // 既然能过前面的检查，说明这里是 isHidden (未翻开) 的非雷格子
+            
+            Debug.Log($">>> 建塔失误！目标下方空空如也！受到 {buildTowerPenaltyDamage} 点反噬伤害！ <<<");
+            
+            // 扣血
+            TakeDamage(player, buildTowerPenaltyDamage);
+
+            // 【关键博弈设计】
+            // 既然建塔失败了，要不要翻开这个格子告诉大家这里是安全的？
+            // 通常为了增加惩罚力度，**不翻开**。
+            // 这样玩家亏了血、亏了能量、亏了回合，而且还不知道这个格子到底是数字几。
+            // cell.revealed = false; // 保持原样
         }
 
+        // 7. 刷新画面并结束回合
         board.Draw(grid);
-        return true; // 无论成功与否，只要能量够尝试，就算一回合
+        return true; 
     }
 
     // 翻开/占领逻辑
