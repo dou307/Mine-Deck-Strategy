@@ -44,6 +44,9 @@ public class Game : MonoBehaviour
     [Header("能量通用设置")]
     public int maxEnergy = 100;
     public int energyPerCell = 5;
+
+    public int buildTowerCost = 5; 
+
     [Header("竞技设置")]
 
     public Vector2Int p2CursorPos = new Vector2Int(31, 15); // P2 初始位置（比如右上角）
@@ -182,7 +185,6 @@ private Cell GetMouseCell()
 
 #region 输入处理 (Input Handling)
 
-    // 玩家 1：完全基于鼠标，传入鼠标当前的格子
     private void HandleP1MouseInput(Cell.Owner player)
     {
         if (currentTurn != player) return;// 如果不是 P1 的回合，直接退出，禁止操作
@@ -194,11 +196,14 @@ private Cell GetMouseCell()
         // 尝试翻开，如果成功翻开/占领，内部会切换回合
             if (Reveal(player, targetCell)) SwitchTurn(); 
         } else if (Input.GetMouseButtonDown(1)) {
-            if (Flag(player, targetCell)) SwitchTurn();
+            Flag(player, targetCell);
         } else if (Input.GetMouseButton(2)) {
             Chord(targetCell); // 预览不消耗回合
         } else if (Input.GetMouseButtonUp(2)) {
             if (Unchord(player, targetCell)) SwitchTurn();
+        }
+        else if (Input.GetKeyDown(KeyCode.T)) {
+            if (BuildTower(player, targetCell)) SwitchTurn();
         }
     }
 
@@ -223,12 +228,15 @@ private Cell GetMouseCell()
         if (Input.GetKeyDown(KeyCode.Space)) {
             if (Reveal(player, targetCell)) SwitchTurn();
         } else if (Input.GetKeyDown(KeyCode.F)) {
-            if (Flag(player, targetCell)) SwitchTurn();
+            Flag(player, targetCell);
         } 
         else if (Input.GetKeyDown(KeyCode.E)) {
             Chord(targetCell);
         } else if (Input.GetKeyUp(KeyCode.E)) {
             if (Unchord(player, targetCell)) SwitchTurn();
+        }
+        else if (Input.GetKeyDown(KeyCode.T)) {
+            if (BuildTower(player, targetCell)) SwitchTurn();
         }
     }
 
@@ -275,6 +283,41 @@ private Cell GetMouseCell()
 
     #region 核心动作 (Actions)
 
+        // --- 新增：建塔逻辑 ---
+    private bool BuildTower(Cell.Owner player, Cell cell)
+    {
+        if (cell == null) return false;
+
+        // 1. 检查能量是否足够 (如果不足5，操作无效，不扣回合)
+        int currentEnergy = (player == Cell.Owner.PlayerA) ? energyA : energyB;
+        if (currentEnergy < buildTowerCost) {
+            Debug.Log("能量不足，无法建造防御塔！");
+            return false;
+        }
+
+        // 2. 消耗能量 (AddEnergy 传入负数即可扣除)
+        AddEnergy(player, -buildTowerCost);
+        Debug.Log($"玩家 {player} 消耗 {buildTowerCost} 能量尝试建塔...");
+
+        // 3. 判断建塔结果
+        // 规则：只能在地雷位置上建塔，且该位置不能已经有塔
+        // 注意：即使失败，能量已扣，且下面返回 true 代表消耗回合
+        if (cell.type == Cell.Type.Mine && !cell.hasTower)
+        {
+            cell.hasTower = true;
+            cell.towerOwner = player;
+            cell.owner = player; // 塔也视为占领
+            Debug.Log(">>> 建塔成功！ <<<");
+        }
+        else
+        {
+            Debug.Log(">>> 建塔失败 (目标不是地雷或已有塔) <<<");
+        }
+
+        board.Draw(grid);
+        return true; // 无论成功与否，只要能量够尝试，就算一回合
+    }
+
     // 翻开/占领逻辑
     private bool Reveal(Cell.Owner player, Cell cell) 
     {
@@ -285,6 +328,9 @@ private Cell GetMouseCell()
             Debug.Log("格子被锁定中！");
             return false; // 操作无效，不切换回合
         }
+
+         // 有塔也不能翻开（或者有塔算作已保护？暂时逻辑：有塔无法被普通翻开覆盖）
+        if (cell.hasTower) return false;
 
         // 地图生成
         if (!generated) {
@@ -348,24 +394,19 @@ private Cell GetMouseCell()
         return true;
     }
 
-    private bool Flag(Cell.Owner player, Cell cell)
+    private void Flag(Cell.Owner player, Cell cell)
     {
-        if (cell == null) return false;
-        if (cell.revealed) return false;
+        if (cell == null) return;
+        if (cell.revealed) return; // 翻开了不能插旗
+        if (cell.hasTower) return; // 有塔了不需要插旗
 
-        // 锁定检查
-        if (cell.lockTimer > 0 && cell.owner != player && cell.owner != Cell.Owner.None) {
-            return false;
-        }
-
+        // 只有无主地或者自己的地可以插旗/取消旗
         if (cell.owner == Cell.Owner.None || cell.owner == player) {
             cell.flagged = !cell.flagged;
-            cell.owner = player;
+            // 插旗不改变 owner，保持 None 或 Player
+            // 也不消耗回合
             board.Draw(grid);
-            return true; // 插旗成功，消耗回合
         }
-        
-        return false;
     }
 
     // 占领/入侵逻辑
@@ -404,7 +445,7 @@ private void Chord(Cell center)
         for (int adjacentY = -1; adjacentY <= 1; adjacentY++) {
             if (grid.TryGetCell(center.position.x + adjacentX, center.position.y + adjacentY, out Cell cell)) {
                 // 只有没翻开且没插旗的格子才显示“下沉/高亮”效果
-                cell.chorded = !cell.revealed && !cell.flagged;
+                cell.chorded = !cell.revealed && !cell.flagged && !cell.hasTower;
             }
         }
     }
@@ -423,7 +464,7 @@ private bool Unchord(Cell.Owner player, Cell center)
 
     bool anyChange = false;
 
-    if (grid.CountAdjacentFlags(center) >= center.number)
+    if (CountAdjacentFlagsAndTowers(center) >= center.number)
     {
         for (int adjacentX = -1; adjacentX <= 1; adjacentX++) {
             for (int adjacentY = -1; adjacentY <= 1; adjacentY++) {
@@ -444,6 +485,23 @@ private bool Unchord(Cell.Owner player, Cell center)
     return anyChange; // 如果周围有格子被翻开，则消耗回合
 }
 
+// 辅助计算周围旗子和塔
+    private int CountAdjacentFlagsAndTowers(Cell cell)
+    {
+        int count = 0;
+        for (int x = -1; x <= 1; x++) {
+            for (int y = -1; y <= 1; y++) {
+                if (x == 0 && y == 0) continue;
+                if (grid.TryGetCell(cell.position.x + x, cell.position.y + y, out Cell neighbor)) {
+                    // 如果是没翻开且插旗了 OR 已经建塔了，都算作“雷”
+                    if ((!neighbor.revealed && neighbor.flagged) || neighbor.hasTower) {
+                        count++;
+                    }
+                }
+            }
+        }
+        return count;
+    }
 private void ClearAllChordedFlags()
 {
     for (int x = 0; x < width; x++) {
