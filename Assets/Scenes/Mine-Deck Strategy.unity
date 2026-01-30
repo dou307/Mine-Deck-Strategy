@@ -520,6 +520,8 @@ MonoBehaviour:
   mineCount: 100
   maxHealth: 100
   damagePerMine: 5
+  damageTowerDirect: 10
+  damageTowerAOE: 3
   healthA: 100
   hpSliderA: {fileID: 1352352889}
   hpTextA: {fileID: 1154869386}
@@ -534,9 +536,13 @@ MonoBehaviour:
   energyTextB: {fileID: 763632785}
   maxEnergy: 100
   energyPerCell: 5
+  buildTowerCost: 5
+  buildTowerPenaltyDamage: 3
+  maxTowersPerPlayer: 10
   p2CursorPos: {x: 15, y: 15}
   p2CursorVisual: {fileID: 195475130}
   occupationLockTime: 3
+  moveRepeatRate: 0.15
 --- !u!156049354 &356482781
 Grid:
   m_ObjectHideFlags: 0
@@ -2253,6 +2259,8 @@ MonoBehaviour:
   tileNum6: {fileID: 11400000, guid: 174aec229aff86b489673e434ed47de8, type: 2}
   tileNum7: {fileID: 11400000, guid: 3b8e4650d0c6f1d46819559961f5c8a7, type: 2}
   tileNum8: {fileID: 11400000, guid: e594addda5b59a343b0d805d873eb7b1, type: 2}
+  tileRedTower: {fileID: 11400000, guid: 4daebd1c800165a49b647026f907ec1c, type: 2}
+  tileBlueTower: {fileID: 11400000, guid: cd9efbbb69f2dc141b5af1b1db49792f, type: 2}
   colorPlayerA: {r: 1, g: 0.5, b: 0.5, a: 1}
   colorPlayerB: {r: 0.5, g: 0.5, b: 1, a: 1}
   colorNone: {r: 1, g: 1, b: 1, a: 1}
