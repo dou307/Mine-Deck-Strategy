@@ -1,29 +1,30 @@
 using UnityEngine;
-using Unity.Netcode;
 using UnityEngine.UI;
+using Unity.Netcode;
 
-public class NetworkUI : MonoBehaviour
+public class ConnectionUI : MonoBehaviour
 {
-    public Button hostButton;
-    public Button clientButton;
+    public Button hostBtn;   // 房主按钮
+    public Button clientBtn; // 客户端按钮
+    public GameObject panel; // 用来在游戏开始后隐藏按钮
 
-    private void Awake()
+    private void Start()
     {
-        // 绑定按钮点击事件
-        hostButton.onClick.AddListener(() => {
+        // 绑定点击事件
+        hostBtn.onClick.AddListener(() => {
             NetworkManager.Singleton.StartHost();
-            HideButtons();
+            HideUI();
         });
 
-        clientButton.onClick.AddListener(() => {
+        clientBtn.onClick.AddListener(() => {
             NetworkManager.Singleton.StartClient();
-            HideButtons();
+            HideUI();
         });
     }
 
-    private void HideButtons()
+    private void HideUI()
     {
-        // 点击后隐藏按钮，防止重复点击
-        gameObject.SetActive(false);
+        if (panel != null) 
+            panel.SetActive(false); // 点击后隐藏按钮，露出游戏画面
     }
 }
