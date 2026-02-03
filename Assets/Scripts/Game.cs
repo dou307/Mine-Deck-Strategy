@@ -1,70 +1,82 @@
 using System.Collections;
 using UnityEngine;
 using TMPro;
-using Unity.Netcode; // 1. 引入命名空间
+using Unity.Netcode;
 
-// 2. 改为继承 NetworkBehaviour
 [DefaultExecutionOrder(-1)]
 public class Game : NetworkBehaviour
 {
-    [Header("回合制设置")]
-    // 3. 使用 NetworkVariable 同步回合所有权
-    // NetworkVariable 只能被服务器修改，客户端会自动监听变化
-    public NetworkVariable<Cell.Owner> netCurrentTurn = new NetworkVariable<Cell.Owner>(Cell.Owner.PlayerA);
-    public NetworkVariable<int> netTurnCount = new NetworkVariable<int>(1);
-    
-    public Color activeTextColor = Color.white;
-    public Color inactiveTextColor = Color.gray;
-
-    [Header("地图设置")]
+    [Header("地图与摄像机设置")]
     public int width = 32;
     public int height = 16;
-    public int mineCount = 100;
+    public int mineCount = 80;
+    public float defaultCameraSize = 10f; // 摄像机大小
 
-    public float defaultCameraSize = 10f;
+    [Header("回合与规则设置")]
+    // 记录当前是谁的回合 (对应之前的 netCurrentTurn)
+    public NetworkVariable<Cell.Owner> currentTurn = new NetworkVariable<Cell.Owner>(Cell.Owner.PlayerA);
+    // 记录总回合数 (对应之前的 currentTurn)
+    public NetworkVariable<int> totalTurnCount = new NetworkVariable<int>(1);
+    
+    public int fogRounds = 3;          // 迷雾回合数
+    public int cellCooldownRounds = 3; // 抢地后冷却回合
+    public int cellMaxDurability = 3;  // 【新增】格子耐久度
 
-    [Header("血量系统")]
+    [Header("数值配置 - 限制")]
     public int maxHealth = 100;
-    public int damagePerMine = 5;
-    public int damageTowerDirect = 10;
-    public int damageTowerAOE = 3;
-
-    // 4. 使用 NetworkVariable 同步血量
-    public NetworkVariable<int> netHealthA = new NetworkVariable<int>(100);
-    public NetworkVariable<int> netHealthB = new NetworkVariable<int>(100);
-
-    public UnityEngine.UI.Slider hpSliderA;
-    public TMPro.TextMeshProUGUI hpTextA;
-    public UnityEngine.UI.Slider hpSliderB;
-    public TMPro.TextMeshProUGUI hpTextB;
-
-    [Header("能量系统")]
-    // 5. 使用 NetworkVariable 同步能量
-    public NetworkVariable<int> netEnergyA = new NetworkVariable<int>(0);
-    public NetworkVariable<int> netEnergyB = new NetworkVariable<int>(0);
-
-    public UnityEngine.UI.Slider energySliderA;
-    public TMPro.TextMeshProUGUI energyTextA;
-    public UnityEngine.UI.Slider energySliderB;
-    public TMPro.TextMeshProUGUI energyTextB;
-
-    [Header("能量通用设置")]
     public int maxEnergy = 100;
-    public int energyPerCell = 5;
-    public int buildTowerCost = 5;
-    public int buildTowerPenaltyDamage = 3;
-
-    [Header("竞技设置")]
     public int maxTowersPerPlayer = 10;
+    
+    // 内部计数器 (用于限制塔数量)
     private int towerCountA = 0;
     private int towerCountB = 0;
 
-    public float occupationLockTime = 3.0f;
+    [Header("数值配置 - 伤害")]
+    public int damageMine = 5;         // 踩雷伤害
+    public int damageTrap = 10;        // 【新增】陷阱伤害
+    public int damageTowerDirect = 10; // 点塔伤害
+    public int damageTowerAOE = 3;     // 塔AOE伤害
+    public int damageBuildFail = 3;    // 建塔失败反噬
+    public int damageRoadConnected = 20; // 通路连通伤害
 
+    [Header("数值配置 - 消耗与收益")]
+    public int costBuildTower = 5;     // 建塔消耗
+    public int costPlaceTrap = 15;     // 【新增】埋雷消耗
+    public int gainNormal = 5;         // 点数字收益
+    public int gainCapture = 7;        // 抢地收益
+
+    [Header("网络变量 - 玩家属性")]
+    // 对应原来的 healthA / healthB
+    public NetworkVariable<int> hpP1 = new NetworkVariable<int>(100);
+    public NetworkVariable<int> hpP2 = new NetworkVariable<int>(100);
+    
+    // 对应原来的 energyA / energyB
+    public NetworkVariable<int> energyP1 = new NetworkVariable<int>(0); 
+    public NetworkVariable<int> energyP2 = new NetworkVariable<int>(0);
+
+    [Header("UI 引用 - 玩家A (P1)")]
+    public UnityEngine.UI.Slider hpSliderA;
+    public TMPro.TextMeshProUGUI hpTextA;
+    public UnityEngine.UI.Slider energySliderA;
+    public TMPro.TextMeshProUGUI energyTextA;
+
+    [Header("UI 引用 - 玩家B (P2)")]
+    public UnityEngine.UI.Slider hpSliderB;
+    public TMPro.TextMeshProUGUI hpTextB;
+    public UnityEngine.UI.Slider energySliderB;
+    public TMPro.TextMeshProUGUI energyTextB;
+
+    [Header("UI 颜色设置")]
+    public Color activeTextColor = Color.white;
+    public Color inactiveTextColor = Color.gray;
+
+    public GameObject gameHUD;
+
+    // 内部引用
     private Board board;
-    private CellGrid grid; // 服务器拥有权威 Grid，客户端拥有“影子”Grid
+    private CellGrid grid;
     private bool gameover;
-    private bool generated;
+    private bool mapGenerated = false;
 
     private void Awake()
     {
@@ -72,9 +84,24 @@ public class Game : NetworkBehaviour
         board = GetComponentInChildren<Board>();
     }
 
+    public struct CellSyncData : INetworkSerializable
+    {
+        public int x, y;
+        public int type;
+        public int number;
+        public void NetworkSerialize<T>(BufferSerializer<T> serializer) where T : IReaderWriter
+        {
+            serializer.SerializeValue(ref x);
+            serializer.SerializeValue(ref y);
+            serializer.SerializeValue(ref type);
+            serializer.SerializeValue(ref number);
+        }
+    }
+
     // 6. 替代 Start()，这是网络对象的初始化入口
     public override void OnNetworkSpawn()
     {
+        if (gameHUD != null) gameHUD.SetActive(true);
         // 只有服务器负责初始化真正的游戏逻辑
         if (IsServer)
         {
@@ -88,20 +115,20 @@ public class Game : NetworkBehaviour
         }
 
         // 7. 绑定变量变化回调 (当数值变化时，自动刷新 UI)
-        netCurrentTurn.OnValueChanged += (oldVal, newVal) => UpdateTurnUI();
+        currentTurn.OnValueChanged += (oldVal, newVal) => UpdateTurnUI();
         
-        netEnergyA.OnValueChanged += (oldVal, newVal) => UpdateEnergyUI(Cell.Owner.PlayerA, newVal);
-        netEnergyB.OnValueChanged += (oldVal, newVal) => UpdateEnergyUI(Cell.Owner.PlayerB, newVal);
+        energyP1.OnValueChanged += (oldVal, newVal) => UpdateEnergyUI(Cell.Owner.PlayerA, newVal);
+        energyP2.OnValueChanged += (oldVal, newVal) => UpdateEnergyUI(Cell.Owner.PlayerB, newVal);
         
-        netHealthA.OnValueChanged += (oldVal, newVal) => UpdateHealthUI(Cell.Owner.PlayerA, newVal);
-        netHealthB.OnValueChanged += (oldVal, newVal) => UpdateHealthUI(Cell.Owner.PlayerB, newVal);
+        hpP1.OnValueChanged += (oldVal, newVal) => UpdateHealthUI(Cell.Owner.PlayerA, newVal);
+        hpP2.OnValueChanged += (oldVal, newVal) => UpdateHealthUI(Cell.Owner.PlayerB, newVal);
 
         // 强制刷新一次 UI
         UpdateTurnUI();
 
-        netTurnCount.OnValueChanged += (oldVal, newVal) => {
+        currentTurn.OnValueChanged += (oldVal, newVal) => {
             if (grid != null) {
-                board.Draw(grid, GetLocalPlayerIdentity(), newVal);
+                board.Draw(grid, GetLocalPlayerIdentity(), totalTurnCount.Value);
             }
         };
 
@@ -114,10 +141,11 @@ public class Game : NetworkBehaviour
 
         StopAllCoroutines();
         gameover = false;
-        generated = false;
-        netTurnCount.Value = 1;
+        totalTurnCount.Value = 1; 
 
         grid = new CellGrid(width, height);
+
+        mapGenerated = false;
         
         // 服务器初始化完，通知所有客户端“重画格子”
         // 这里简化处理：因为刚开始都是空的，所以客户端 new CellGrid 就行了
@@ -126,11 +154,11 @@ public class Game : NetworkBehaviour
         towerCountB = 0;
 
         // 修改 NetworkVariable
-        netEnergyA.Value = 0;
-        netEnergyB.Value = 0;
-        netHealthA.Value = maxHealth;
-        netHealthB.Value = maxHealth;
-        netCurrentTurn.Value = Cell.Owner.PlayerA;
+        energyP1.Value = 0;
+        energyP2.Value = 0;
+        hpP1.Value = maxHealth;
+        hpP2.Value = maxHealth;
+        currentTurn.Value = Cell.Owner.PlayerA;
 
         Debug.Log("服务器：新对局已开始");
         
@@ -150,64 +178,48 @@ public class Game : NetworkBehaviour
             return;
         }
 
-        UpdateCellTimers(); // 计时器逻辑（服务器端跑就行，客户端 visuals 可以不跑）
-
         // 8. 核心修改：输入检测
         // 我们这里做一个简单约定：Host (主机) 永远是 PlayerA，Client (加入者) 永远是 PlayerB
         // 以后可以用 Player ID 系统做得更高级
         
-        if (IsHost) 
-        {
-            HandleInput(Cell.Owner.PlayerA);
-        }
-        else if (IsClient) // 非 Host 的 Client
-        {
-            HandleInput(Cell.Owner.PlayerB);
-        }
+       HandleInput(GetLocalPlayerIdentity());
     }
 
-    // 客户端运行：检测输入 -> 发送请求给服务器
-    private void HandleInput(Cell.Owner myIdentity)
+    private void HandleInput(Cell.Owner me)
     {
-        if (netCurrentTurn.Value != myIdentity) return;
-
-        Vector3 worldPosition = Camera.main.ScreenToWorldPoint(Input.mousePosition);
-        Vector3Int cellPos = board.tilemap.WorldToCell(worldPosition);
-
+        Vector3Int pos = board.tilemap.WorldToCell(Camera.main.ScreenToWorldPoint(Input.mousePosition));
+        
         // 越界检查
-        if (cellPos.x < 0 || cellPos.x >= width || cellPos.y < 0 || cellPos.y >= height) return;
+        if (!grid.InBounds(pos.x, pos.y)) return;
+        
+        // 迷雾锁定检查 (前3回合分屏)
+        if (totalTurnCount.Value <= fogRounds * 2)
+        {
+            if (me == Cell.Owner.PlayerA && pos.x >= width / 2) return;
+            if (me == Cell.Owner.PlayerB && pos.x < width / 2) return;
+        }
 
-        // --- 1. 左键翻开 ---
+        // --- 鼠标左键：翻开 / 占领 / 攻击 ---
         if (Input.GetMouseButtonDown(0)) 
         {
-            RequestRevealServerRpc(cellPos.x, cellPos.y);
+            // 原来叫 RequestRevealServerRpc，现在统一用 RequestActionServerRpc
+            RequestActionServerRpc(pos.x, pos.y, "REVEAL");
         }
-        // --- 2. 右键插旗 ---
-        else if (Input.GetMouseButtonDown(1)) 
+        // --- 鼠标右键：插旗 (新增) ---
+        else if (Input.GetMouseButtonDown(1))
         {
-            RequestFlagServerRpc(cellPos.x, cellPos.y);
+            // 插旗不消耗回合，所以它不走 EndTurn 流程，独立使用 RequestFlagServerRpc
+            RequestFlagServerRpc(pos.x, pos.y);
         }
-        // --- 3. T键建塔 ---
+        // --- T键：建塔 ---
         else if (Input.GetKeyDown(KeyCode.T)) 
         {
-            RequestBuildTowerServerRpc(cellPos.x, cellPos.y);
+            RequestActionServerRpc(pos.x, pos.y, "TOWER");
         }
-        // --- 4. 【新增】中键/双击预览 (只在本地显示，不发包) ---
-        else if (Input.GetMouseButton(2)) 
+        // --- K键：埋设陷阱 (新增功能) ---
+        else if (Input.GetKeyDown(KeyCode.K)) 
         {
-            // 获取本地格子的数据进行预览
-            if(grid.TryGetCell(cellPos.x, cellPos.y, out Cell cell))
-            {
-                ChordLocal(cell); // 下面会写这个本地方法
-            }
-        }
-        // --- 5. 【新增】中键/双击抬起 (发送请求) ---
-        else if (Input.GetMouseButtonUp(2)) 
-        {
-            // 先清除本地预览效果
-            ClearAllChordedFlagsLocal();
-            // 发送请求给服务器
-            RequestUnchordServerRpc(cellPos.x, cellPos.y);
+            RequestActionServerRpc(pos.x, pos.y, "TRAP");
         }
     }
 
@@ -219,18 +231,19 @@ public class Game : NetworkBehaviour
 
         if (!center.revealed || center.type != Cell.Type.Number) return;
 
+        Cell.Owner me = GetLocalPlayerIdentity();
         for (int x = -1; x <= 1; x++) {
             for (int y = -1; y <= 1; y++) {
                 int nx = center.position.x + x;
                 int ny = center.position.y + y;
                 if (grid.TryGetCell(nx, ny, out Cell c)) {
-                    if (!c.revealed && !c.flagged && !c.hasTower) {
+                    if (!c.revealed && !c.IsFlaggedBy(me) && !c.hasTower) {
                         c.chorded = true; // 临时标记
                     }
                 }
             }
         }
-        board.Draw(grid, GetLocalPlayerIdentity(), netTurnCount.Value); // 客户端重绘
+        board.Draw(grid, GetLocalPlayerIdentity(), totalTurnCount.Value); // 客户端重绘
     }
 
     private void ClearAllChordedFlagsLocal()
@@ -240,7 +253,7 @@ public class Game : NetworkBehaviour
                 grid[x, y].chorded = false;
             }
         }
-        board.Draw(grid, GetLocalPlayerIdentity(), netTurnCount.Value);
+        board.Draw(grid, GetLocalPlayerIdentity(), totalTurnCount.Value);
     }
 
     // -----------------------------------------------------------------------
@@ -248,95 +261,172 @@ public class Game : NetworkBehaviour
     // -----------------------------------------------------------------------
 
     // [ServerRpc]：客户端调用，服务器执行
-    [ServerRpc(RequireOwnership = false)] // 允许任何客户端调用
-    private void RequestRevealServerRpc(int x, int y, ServerRpcParams rpcParams = default)
+
+    [ServerRpc(RequireOwnership = false)]
+    private void RequestActionServerRpc(int x, int y, string action, ServerRpcParams rpc = default)
     {
-        // 1. 身份验证：是谁发的？
-        bool isSenderHost = rpcParams.Receive.SenderClientId == NetworkManager.Singleton.LocalClientId;
-        Cell.Owner sender = isSenderHost ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+        // 获取发送者的 ID
+        ulong senderId = rpc.Receive.SenderClientId;
+        
+        // 核心逻辑：判定发送者是 A 还是 B
+        // 只要是 ID 0 发来的就是 P1，否则就是 P2
+        Cell.Owner sender = (senderId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
 
-        // 2. 规则验证
-        if (sender != netCurrentTurn.Value) return; // 没轮到你
-
-        // 3. 执行逻辑 (操作服务器的权威 Grid)
-        if (grid.TryGetCell(x, y, out Cell cell))
+        // 校验：如果不是当前回合的玩家在操作，直接拦截
+        if (sender != currentTurn.Value) 
         {
-            if (Reveal(sender, cell))
-            {
-                SwitchTurn(); // 逻辑内部如果返回 true，说明耗费了回合
-            }
+            Debug.LogWarning($"非回合内玩家尝试操作：发送者 {sender}, 当前回合 {currentTurn.Value}");
+            return;
         }
+
+        Cell cell = grid[x, y];
+
+        // 2. 【新增】如果是废墟，禁止操作
+        if (cell.isBedrock) return; 
+
+        // 3. 【新增】如果是冷却中，禁止操作
+        if (totalTurnCount.Value < cell.unlockTurn) return; 
+
+        bool success = false;
+        // 根据发来的指令类型执行对应逻辑
+        switch (action)
+        {
+            case "REVEAL": success = ProcessReveal(sender, cell); break;
+            case "TOWER": success = ProcessBuildTower(sender, cell); break;
+            case "TRAP": success = ProcessPlaceTrap(sender, cell); break; // 新增埋雷逻辑
+        }
+
+        // 如果操作成功，才结束回合
+        if (success) EndTurn();
     }
 
     [ServerRpc(RequireOwnership = false)]
     private void RequestFlagServerRpc(int x, int y, ServerRpcParams rpcParams = default)
     {
-        bool isSenderHost = rpcParams.Receive.SenderClientId == NetworkManager.Singleton.LocalClientId;
-        Cell.Owner sender = isSenderHost ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+        // 1. 确定操作者身份
+        ulong clientId = rpcParams.Receive.SenderClientId;
+        // Host 判定为 PlayerA，其他 Client 判定为 PlayerB
+        Cell.Owner sender = (clientId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
 
         if (grid.TryGetCell(x, y, out Cell cell))
         {
-            Flag(sender, cell);
-        }
-    }
+            // 2. 规则检查：已翻开、有防御塔、或已炸开的地雷不能插旗
+            if (cell.revealed || cell.hasTower || cell.exploded) return;
 
-    [ServerRpc(RequireOwnership = false)]
-    private void RequestBuildTowerServerRpc(int x, int y, ServerRpcParams rpcParams = default)
-    {
-        bool isSenderHost = rpcParams.Receive.SenderClientId == NetworkManager.Singleton.LocalClientId;
-        Cell.Owner sender = isSenderHost ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
-        if (sender != netCurrentTurn.Value) return;
-
-        if (grid.TryGetCell(x, y, out Cell cell))
-        {
-            if (BuildTower(sender, cell))
+            // 3. 切换状态：只修改属于该玩家的私有标记变量
+            bool newState;
+            if (sender == Cell.Owner.PlayerA)
             {
-                SwitchTurn();
+                cell.flaggedP1 = !cell.flaggedP1;
+                newState = cell.flaggedP1;
             }
+            else
+            {
+                cell.flaggedP2 = !cell.flaggedP2;
+                newState = cell.flaggedP2;
+            }
+
+            // 4. 定向同步：利用 ClientRpcParams 只发送给当前操作的客户端
+            ClientRpcParams clientRpcParams = new ClientRpcParams
+            {
+                Send = new ClientRpcSendParams
+                {
+                    TargetClientIds = new ulong[] { clientId }
+                }
+            };
+
+            // 通知该客户端更新本地的旗子显示状态
+            UpdateSingleFlagClientRpc(x, y, newState, clientRpcParams);
         }
     }
+
+    [ClientRpc]
+    private void UpdateSingleFlagClientRpc(int x, int y, bool state, ClientRpcParams rpcParams = default)
+    {
+        if (grid.TryGetCell(x, y, out Cell c))
+        {
+            // 客户端获取自己的本地身份
+            Cell.Owner me = GetLocalPlayerIdentity();
+
+            // 更新本地对应的标记位
+            if (me == Cell.Owner.PlayerA) c.flaggedP1 = state;
+            else if (me == Cell.Owner.PlayerB) c.flaggedP2 = state;
+
+            // 立即重绘棋盘，Board.Draw 会根据 me 的身份读取对应的标记
+            board.Draw(grid, me, totalTurnCount.Value);
+        }
+    }
+
 
     [ServerRpc(RequireOwnership = false)]
     private void RequestUnchordServerRpc(int x, int y, ServerRpcParams rpcParams = default)
     {
-        bool isSenderHost = rpcParams.Receive.SenderClientId == NetworkManager.Singleton.LocalClientId;
-        Cell.Owner sender = isSenderHost ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+        // 身份验证：确定是谁在尝试 Unchord
+        ulong clientId = rpcParams.Receive.SenderClientId;
+        Cell.Owner sender = (clientId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
         
-        if (sender != netCurrentTurn.Value) return;
+        // 回合检查
+        if (sender != currentTurn.Value) return;
 
         if (grid.TryGetCell(x, y, out Cell cell))
         {
-            // 调用核心逻辑 Unchord
+            // 执行 Unchord 并传入身份
             if (Unchord(sender, cell)) 
             {
-                // 如果 Unchord 成功触发了翻开，SwitchTurn 会在 Reveal 里被调用吗？
-                // 不会，Reveal 里只有翻开单个雷才切换回合。
-                // 按照你之前的逻辑，Unchord 只要翻开了东西就算一回合。
-                SwitchTurn();
+                // 只要成功触发了翻开动作，就结束当前回合
+                EndTurn();
             }
         }
     }
 
-    // [ClientRpc]：服务器调用，所有客户端（包括 Host 自己）执行
-    // 用来同步画面
-    [ClientRpc]
-    private void SyncCellClientRpc(int x, int y, int typeInt, int number, int ownerInt, bool revealed, bool flagged, bool hasTower, int towerOwnerInt, bool exploded)
+    // 发送数据时的辅助包装函数
+    private void SyncCell(Cell c)
     {
-        // 客户端接收数据，更新本地的“影子”Grid
-        if (grid.TryGetCell(x, y, out Cell cell))
-        {
-            cell.type = (Cell.Type)typeInt;
-            cell.number = number;
-            cell.owner = (Cell.Owner)ownerInt;
-            cell.revealed = revealed;
-            cell.flagged = flagged;
-            cell.hasTower = hasTower;
-            cell.towerOwner = (Cell.Owner)towerOwnerInt;
-            cell.exploded = exploded;
+        SyncCellClientRpc(
+            c.position.x, 
+            c.position.y,
+            (int)c.type, 
+            c.number, 
+            (int)c.owner, 
+            c.revealed,
+            c.hasTower, 
+            (int)c.towerOwner,
+            c.exploded, 
+            c.unlockTurn,
+            c.hasTrap,           
+            (int)c.trapOwner,    
+            c.isBedrock,         
+            c.currentDurability,
+            c.isTowerRevealed
+        );
+    }
 
-            // 只有这个格子需要重绘，不需要重绘整个 Board (优化性能)
-            // 但你的 Board.Draw 目前是重绘全部的，为了简单我们暂时还是重绘全部，或者你可以去 Board.cs 加一个 DrawSingleCell
-            board.Draw(grid, GetLocalPlayerIdentity(), netTurnCount.Value);
+    // 客户端接收数据的 RPC
+    [ClientRpc]
+    private void SyncCellClientRpc(int x, int y, int type, int num, int owner, bool rev, 
+                                bool hasT, int tOwner, bool expl, int unlock,
+                                bool trap, int trapOwner, bool bedrock, int dura, bool isTowerRev)
+    {
+        if (grid.TryGetCell(x, y, out Cell c))
+        {
+            // 更新公共数据
+            c.type = (Cell.Type)type;
+            c.number = num;
+            c.owner = (Cell.Owner)owner;
+            c.revealed = rev;
+            c.hasTower = hasT;
+            c.towerOwner = (Cell.Owner)tOwner;
+            c.exploded = expl;
+            c.unlockTurn = unlock;
+            c.hasTrap = trap;
+            c.trapOwner = (Cell.Owner)trapOwner;
+            c.isBedrock = bedrock;
+            c.currentDurability = dura;
+            c.isTowerRevealed = isTowerRev;
+
+            // 【关键】由于 SyncCell 是公共同步，它不应该修改本地的 flaggedP1/P2。
+            // 渲染时 Draw 会自动根据 localPlayer 身份读取本地保存的私有旗子。
+            board.Draw(grid, GetLocalPlayerIdentity(), totalTurnCount.Value);
         }
     }
 
@@ -344,7 +434,7 @@ public class Game : NetworkBehaviour
     private void ResetBoardClientRpc()
     {
         grid = new CellGrid(width, height);
-        board.Draw(grid, GetLocalPlayerIdentity(), netTurnCount.Value);
+        board.Draw(grid, GetLocalPlayerIdentity(), totalTurnCount.Value);
     }
 
     // -----------------------------------------------------------------------
@@ -356,140 +446,164 @@ public class Game : NetworkBehaviour
         // 只有服务器能修改 NetworkVariable
         if (IsServer)
         {
-            netTurnCount.Value++; // 【新增】回合数 +1
+            currentTurn.Value++; // 【新增】回合数 +1
 
-            if (netCurrentTurn.Value == Cell.Owner.PlayerA)
-                netCurrentTurn.Value = Cell.Owner.PlayerB;
+            if (currentTurn.Value == Cell.Owner.PlayerA)
+                currentTurn.Value = Cell.Owner.PlayerB;
             else
-                netCurrentTurn.Value = Cell.Owner.PlayerA;
+                currentTurn.Value = Cell.Owner.PlayerA;
         }
     }
 
-    private bool Reveal(Cell.Owner player, Cell cell)
+private bool ProcessReveal(Cell.Owner player, Cell cell)
     {
-        if (cell == null) return false;
+        if (cell.owner == player) return false;
 
-        // 锁定检查
-        if (cell.lockTimer > 0 && cell.owner != player && cell.owner != Cell.Owner.None) return false;
-
-        bool isDirectEnemyTower = (cell.hasTower && cell.towerOwner != player);
-        bool isCapturable = (cell.owner != Cell.Owner.None && cell.owner != player);
-        bool isHidden = !cell.revealed;
-
-        // 误触保护：已翻开且无利可图的格子，点了不算回合
-        if (!isHidden && !isCapturable && !isDirectEnemyTower) return false;
-
-        // --- 【新增】防御塔反伤计算 ---
-        int defenseDamage = CheckAndApplyTowerDefense(player, cell);
-
-        // 如果直接点了敌人的塔，扣了血就算回合结束，不需要继续翻开了
-        if (isDirectEnemyTower)
+        // 如果地图还没生成，利用当前点击的格子作为“安全点”生成地图
+        if (!mapGenerated)
         {
+            Debug.Log($"初次点击 ({cell.position.x}, {cell.position.y})，开始生成地雷...");
+            
+            // 1. 生成地雷 (传入当前格子以避免在该位置生成雷)
+            grid.GenerateMines(cell, mineCount);
+            
+            // 2. 计算周围数字
+            grid.GenerateNumbers();
+            
+            // 3. 标记已生成
+            mapGenerated = true;
+            
+            // 注意：此时 cell 里的数据(Type/Number)已经因为上面两步变了，
+            // 接下来的逻辑会使用最新的数据进行判断。
+        }
+
+        // 1. 检查塔防 AOE (保留原逻辑)
+        CheckAndApplyTowerDefense(player, cell);
+
+        // 2. 【新增】检查人造陷阱 (如果这里有别人的陷阱)
+        if (cell.hasTrap && cell.trapOwner != player)
+        {
+            cell.hasTrap = false;
+            cell.trapOwner = Cell.Owner.None;
+            
+            // 扣血 10 点
+            ModifyHP(player, damageTrap); 
+            Debug.Log("踩中陷阱！行动中止。");
+            
+            // 只要踩了陷阱，回合直接结束，格子不会被占领
+            SyncCell(cell);
             return true; 
         }
 
-        // 己方塔不能点
-        if (cell.hasTower && cell.towerOwner == player) return false;
-
-        // 地图生成 (First Click)
-        if (!generated) {
-            grid.GenerateMines(cell, mineCount);
-            grid.GenerateNumbers();
-            generated = true;
-        }
-
-        bool actionTaken = false;
-
-        // 正常的翻开/入侵逻辑
-        if (isCapturable) {
-            CaptureCell(player, cell);
-            actionTaken = true;
-        } else {
-            actionTaken = ExecuteReveal(player, cell);
-        }
-
-        // 如果受到了防御塔伤害，哪怕 ExecuteReveal 没翻开新东西（比如重复点），也强制算作有效回合
-        if (defenseDamage > 0) actionTaken = true;
-
-        // 只需要在状态改变时同步，如果只是扣血(defenseDamage)，血量变量会自动同步，这里不用 Sync
-        // 但如果 CaptureCell 或 ExecuteReveal 改变了格子，它们内部需要 Sync
-        
-        return actionTaken;
-    }
-
-    // 执行具体的翻开逻辑 (服务器端)
-    private bool ExecuteReveal(Cell.Owner player, Cell cell)
-    {
-        // 1. 基础检查：已经翻开或插旗的不能翻
-        if (cell.revealed) return false;
-        if (cell.flagged) return false;
-
-        // 2. 情况 A：踩雷
-        if (cell.type == Cell.Type.Mine)
+        // 3. 抢地逻辑 (敌人已翻开的格子)
+        if (cell.revealed && cell.owner != Cell.Owner.None)
         {
-            cell.revealed = true;
-            cell.exploded = true; // 标记爆炸
-            cell.owner = player;  // 归属变更为踩雷者
-            
-            // 扣血
-            TakeDamage(player, damagePerMine);
-            
-            // 同步数据给所有客户端
-            SyncCellToClients(cell);
-            
-            return true; // 这是一个有效动作（消耗回合）
-        }
+            if (cell.hasTower)
+            {
+                ModifyHP(player, damageTowerDirect); // 点塔扣血
+                return true;
+            }
 
-        // 3. 情况 B：点到空地 -> 触发泛洪 (Flood)
-        if (cell.type == Cell.Type.Empty)
-        {
-            // 开启协程进行扩散
-            // 注意：Flood 协程内部每翻开一个格子，都要调用 SyncCellToClients
-            StartCoroutine(Flood(cell, player));
+            // 【新增】焦土耐久扣除
+            cell.currentDurability--;
+            
+            if (cell.currentDurability <= 0)
+            {
+                // 变废墟
+                cell.isBedrock = true;
+                cell.owner = Cell.Owner.None;
+                Debug.Log("土地崩坏！");
+            }
+            else
+            {
+                // 正常占领
+                cell.owner = player;
+                cell.unlockTurn = totalTurnCount.Value + cellCooldownRounds; // 设置冷却
+                ModifyEnergy(player, gainCapture); // 加能量
+            }
+            SyncCell(cell);
             return true;
         }
-        
-        // 4. 情况 C：点到数字 -> 正常占领
-        else
+
+        // 4. 开荒逻辑 (未知格子)
+        if (!cell.revealed)
         {
-            cell.revealed = true;
-            cell.owner = player;
-            cell.lockTimer = occupationLockTime; // 设置占领锁定时间
-            
-            // 加能量
-            AddEnergy(player, energyPerCell);
-            
-            // 同步数据
-            SyncCellToClients(cell);
-            
+            if (cell.type == Cell.Type.Mine)
+            {
+                // 踩雷
+                cell.revealed = true;
+                cell.exploded = true;
+                cell.owner = player;
+                ModifyHP(player, damageMine);
+                SyncCell(cell);
+                return true;
+            }
+            else if (cell.type == Cell.Type.Empty)
+            {
+                ExecuteFloodFillServer(cell, player);
+            }
+            else
+            {
+                // 普通数字格
+                cell.revealed = true;
+                cell.owner = player;
+                cell.unlockTurn = totalTurnCount.Value + cellCooldownRounds;
+                ModifyEnergy(player, gainNormal);
+                SyncCell(cell);
+            }
             return true;
         }
+        return false;
     }
 
-    private void CaptureCell(Cell.Owner player, Cell cell)
+    private bool ProcessPlaceTrap(Cell.Owner player, Cell cell)
     {
-        cell.owner = player;
-        cell.lockTimer = occupationLockTime;
-        // 记得同步！
-        SyncCellToClients(cell); 
+        // 规则：必须是自己的地盘，且不能是雷，不能有塔，不能已经有陷阱
+        if (cell.owner != player) return false;
+        if (cell.type == Cell.Type.Mine) return false;
+        if (cell.hasTower) return false;
+        if (cell.hasTrap) return false;
+
+        // 检查能量
+        int currentE = (player == Cell.Owner.PlayerA) ? energyP1.Value : energyP2.Value;
+        if (currentE < costPlaceTrap) return false;
+
+        // 扣能量
+        ModifyEnergy(player, -costPlaceTrap);
+
+        // 设置陷阱
+        cell.hasTrap = true;
+        cell.trapOwner = player;
+        
+        Debug.Log("陷阱部署完毕。");
+        SyncCell(cell);
+        return true;
     }
-    
+
     // 逻辑层：插旗
     private void Flag(Cell.Owner player, Cell cell)
     {
-        if (cell.revealed) return;
-        cell.flagged = !cell.flagged;
-        SyncCellToClients(cell); // 同步
-    }
+        // 已经翻开、有塔、已炸的不能插旗
+        if (cell.revealed || cell.hasTower || cell.exploded) return;
 
+        // 修改点：根据操作者身份切换对应的私有变量
+        if (player == Cell.Owner.PlayerA) cell.flaggedP1 = !cell.flaggedP1;
+        else if (player == Cell.Owner.PlayerB) cell.flaggedP2 = !cell.flaggedP2;
+
+        // 注意：这里不要用 SyncCellToClients，
+        // 应在 RequestFlagServerRpc 中使用定向的 ClientRpcParams 同步给个人
+    }
     // 服务器端逻辑：建造防御塔
-    private bool BuildTower(Cell.Owner player, Cell cell)
+    private bool ProcessBuildTower(Cell.Owner player, Cell cell)
     {
         if (cell == null) return false;
 
         // 1. 【规则检查】被锁定的格子不能操作
-        if (cell.lockTimer > 0 && cell.owner != player && cell.owner != Cell.Owner.None) return false;
-
+        if (totalTurnCount.Value < cell.unlockTurn && cell.owner != player && cell.owner != Cell.Owner.None) 
+        {
+            Debug.Log("该格子处于战乱冷却期，无法操作！");
+            return false;
+        }
         // 2. 【规则检查】已有塔
         if (cell.hasTower) return false;
 
@@ -518,11 +632,11 @@ public class Game : NetworkBehaviour
         }
 
         // 6. 【能量检查】
-        int currentEnergy = (player == Cell.Owner.PlayerA) ? netEnergyA.Value : netEnergyB.Value;
-        if (currentEnergy < buildTowerCost) return false;
+        int currentEnergy = (player == Cell.Owner.PlayerA) ? energyP1.Value : energyP2.Value;
+        if (currentEnergy < costBuildTower ) return false;
 
         // --- 扣除消耗 ---
-        AddEnergy(player, -buildTowerCost);
+        ModifyEnergy(player, -costBuildTower );
 
         // 7. 【判定结果】
         bool isMine = (cell.type == Cell.Type.Mine);
@@ -549,8 +663,8 @@ public class Game : NetworkBehaviour
         else
         {
             // --- 建造失败 (盲注错误) ---
-            Debug.Log($"建塔失败！受到 {buildTowerPenaltyDamage} 点反噬伤害");
-            TakeDamage(player, buildTowerPenaltyDamage);
+            Debug.Log($"建塔失败！受到 {damageBuildFail} 点反噬伤害");
+            ModifyHP(player, damageBuildFail);
             
             // 注意：建塔失败不翻开格子，只扣血。
             // 也不需要 SyncCellToClients，因为格子状态没变，只是血量变了（血量会自动同步）
@@ -562,37 +676,50 @@ public class Game : NetworkBehaviour
     private void SyncCellToClients(Cell cell)
     {
         SyncCellClientRpc(
-            cell.position.x, 
-            cell.position.y, 
-            (int)cell.type, 
-            cell.number, 
-            (int)cell.owner, 
-            cell.revealed, 
-            cell.flagged,
+            cell.position.x,
+            cell.position.y,
+            (int)cell.type,
+            cell.number,
+            (int)cell.owner,
+            cell.revealed,
             cell.hasTower,
             (int)cell.towerOwner,
-            cell.exploded
+            cell.exploded,
+            
+            // --- 以下是新增参数，必须加上 ---
+            cell.unlockTurn,       // 冷却解锁回合
+            cell.hasTrap,          // 是否有陷阱
+            (int)cell.trapOwner,   // 陷阱归属
+            cell.isBedrock,        // 是否是废墟
+            cell.currentDurability, // 当前耐久
+            cell.isTowerRevealed
         );
     }
 
     // 服务端逻辑
     private bool Unchord(Cell.Owner player, Cell center)
     {
+        // 基础检查：只有已翻开的数字格可以触发
         if (center == null || !center.revealed || center.type != Cell.Type.Number) return false;
 
-        // 检查周围旗子数量是否达标
-        if (CountAdjacentFlagsAndTowers(center) >= center.number)
+        // 检查：操作者自己标记的旗子 + 塔的数量 是否等于 该格子的数字
+        if (CountAdjacentFlagsAndTowers(center, player) >= center.number)
         {
             bool anyChange = false;
-            // 遍历周围
-            for (int x = -1; x <= 1; x++) {
-                for (int y = -1; y <= 1; y++) {
+            
+            // 遍历周围 8 个格子进行尝试翻开
+            for (int x = -1; x <= 1; x++) 
+            {
+                for (int y = -1; y <= 1; y++) 
+                {
                     if (x == 0 && y == 0) continue;
                     
-                    if (grid.TryGetCell(center.position.x + x, center.position.y + y, out Cell neighbor)) {
-                        // 递归调用 Reveal，只要有一个成功，就算动作有效
-                        // 注意：这里调用的是服务端的 Reveal
-                        if (Reveal(player, neighbor)) {
+                    if (grid.TryGetCell(center.position.x + x, center.position.y + y, out Cell neighbor)) 
+                    {
+                        // 注意：由于旗子是私有的，对方可能在雷上没插旗。
+                        // 但这里执行的是 ProcessReveal，它内部会进行雷/陷阱/扣血的判定。
+                        if (ProcessReveal(player, neighbor)) 
+                        {
                             anyChange = true;
                         }
                     }
@@ -606,14 +733,18 @@ public class Game : NetworkBehaviour
 
     
     // 辅助函数：计算周围旗子和塔
-    private int CountAdjacentFlagsAndTowers(Cell cell)
+    private int CountAdjacentFlagsAndTowers(Cell cell, Cell.Owner actor)
     {
         int count = 0;
         for (int x = -1; x <= 1; x++) {
             for (int y = -1; y <= 1; y++) {
                 if (x == 0 && y == 0) continue;
                 if (grid.TryGetCell(cell.position.x + x, cell.position.y + y, out Cell neighbor)) {
-                    if ((!neighbor.revealed && neighbor.flagged) || neighbor.hasTower) {
+                    
+                    // 根据行动者身份判断他眼中的旗子
+                    bool hasFlag = (actor == Cell.Owner.PlayerA) ? neighbor.flaggedP1 : neighbor.flaggedP2;
+                    
+                    if ((!neighbor.revealed && hasFlag) || neighbor.hasTower) {
                         count++;
                     }
                 }
@@ -636,69 +767,107 @@ public class Game : NetworkBehaviour
         // 或者你可以请求服务器 RevealAllMines
     }
 
-    // 泛洪算法 (需要改为服务器端协程)
-    private IEnumerator Flood(Cell cell, Cell.Owner player)
+    private void ExecuteFloodFillServer(Cell startCell, Cell.Owner player)
     {
-        if (gameover || cell.revealed || cell.flagged || cell.type == Cell.Type.Mine) yield break;
+        if (!IsServer) return;
 
-        cell.revealed = true;
-        cell.owner = player;
-        AddEnergy(player, energyPerCell);
+        System.Collections.Generic.Queue<Cell> queue = new System.Collections.Generic.Queue<Cell>();
+        System.Collections.Generic.List<CellSyncData> changedCells = new System.Collections.Generic.List<CellSyncData>();
         
-        // 每次变动都同步
-        SyncCellToClients(cell);
-        
-        yield return new WaitForSeconds(0.01f); // 服务器端可以稍微快点
+        queue.Enqueue(startCell);
 
-        if (cell.type == Cell.Type.Empty)
+        while (queue.Count > 0)
         {
-            for (int x = -1; x <= 1; x++) {
-                for (int y = -1; y <= 1; y++) {
-                    if (x == 0 && y == 0) continue;
-                    if (grid.TryGetCell(cell.position.x + x, cell.position.y + y, out Cell neighbor)) {
-                        if (!neighbor.revealed) yield return Flood(neighbor, player);
+            Cell cell = queue.Dequeue();
+
+            if (cell.revealed || cell.type == Cell.Type.Mine) continue;
+
+            // 执行原有逻辑：翻开、分配所有权、增加能量
+            cell.revealed = true;
+            cell.owner = player;
+            // 只有开荒（非抢地）通过 FloodFill 触发时，应用正常的收益逻辑
+            ModifyEnergy(player, gainNormal);
+
+            // 记录变化坐标用于同步
+            changedCells.Add(new CellSyncData { x = cell.position.x, y = cell.position.y,type = (int)cell.type,number = cell.number });
+
+            // 如果是空格，继续向四周扩散
+            if (cell.type == Cell.Type.Empty)
+            {
+                for (int x = -1; x <= 1; x++)
+                {
+                    for (int y = -1; y <= 1; y++)
+                    {
+                        if (x == 0 && y == 0) continue;
+                        if (grid.TryGetCell(cell.position.x + x, cell.position.y + y, out Cell neighbor))
+                        {
+                            if (!neighbor.revealed && neighbor.type != Cell.Type.Mine)
+                            {
+                                queue.Enqueue(neighbor);
+                            }
+                        }
                     }
                 }
             }
         }
+
+        // 批量同步给所有客户端
+        if (changedCells.Count > 0)
+        {
+            SyncFloodFillClientRpc(changedCells.ToArray(), player);
+        }
+    }
+
+    [ClientRpc]
+    private void SyncFloodFillClientRpc(CellSyncData[] cells, Cell.Owner player)
+    {
+        foreach (var data in cells)
+        {
+            if (grid.TryGetCell(data.x, data.y, out Cell c))
+            {
+                c.revealed = true;
+                c.owner = player;
+                c.type = (Cell.Type)data.type;
+                c.number = data.number;
+            }
+        }
+        // 一次性重绘，避免多次重绘造成的掉帧
+        board.Draw(grid, GetLocalPlayerIdentity(), totalTurnCount.Value);
     }
 
     // -----------------------------------------------------------------------
     // 数值管理
     // -----------------------------------------------------------------------
 
-    public void AddEnergy(Cell.Owner player, int amount)
+    public void ModifyEnergy(Cell.Owner player, int amount)
     {
         if (player == Cell.Owner.PlayerA)
-            netEnergyA.Value = Mathf.Clamp(netEnergyA.Value + amount, 0, maxEnergy);
+            energyP1.Value = Mathf.Clamp(energyP1.Value + amount, 0, maxEnergy);
         else
-            netEnergyB.Value = Mathf.Clamp(netEnergyB.Value + amount, 0, maxEnergy);
+            energyP2.Value = Mathf.Clamp(energyP2.Value + amount, 0, maxEnergy);
     }
 
-    private void TakeDamage(Cell.Owner player, int amount)
+    private void ModifyHP(Cell.Owner player, int damage)
     {
+        // damage 传入正数表示扣血
         if (player == Cell.Owner.PlayerA)
         {
-            netHealthA.Value -= amount;
-            if (netHealthA.Value <= 0) {
-                netHealthA.Value = 0;
-                GameOver(Cell.Owner.PlayerB); // P1 死了，P2 赢
-            }
+            hpP1.Value = Mathf.Clamp(hpP1.Value - damage, 0, maxHealth);
+            if (hpP1.Value <= 0) GameOver(Cell.Owner.PlayerB);
         }
         else
         {
-            netHealthB.Value -= amount;
-            if (netHealthB.Value <= 0) {
-                netHealthB.Value = 0;
-                GameOver(Cell.Owner.PlayerA); // P2 死了，P1 赢
-            }
+            hpP2.Value = Mathf.Clamp(hpP2.Value - damage, 0, maxHealth);
+            if (hpP2.Value <= 0) GameOver(Cell.Owner.PlayerA);
         }
     }
 
     private void GameOver(Cell.Owner winner)
     {
+        if (gameover) return; // 状态锁：防止一回合内多次触发结算
         gameover = true;
-        // 通知所有客户端
+        
+        Debug.Log($"游戏结束！获胜者是: {winner}");
         GameOverClientRpc(winner);
     }
 
@@ -710,9 +879,8 @@ public class Game : NetworkBehaviour
 
     private void UpdateTurnUI()
     {
-        // 根据 netCurrentTurn.Value 变色
         if (energyTextA && energyTextB) {
-            bool isA = netCurrentTurn.Value == Cell.Owner.PlayerA;
+            bool isA = currentTurn.Value == Cell.Owner.PlayerA;
             energyTextA.color = isA ? activeTextColor : inactiveTextColor;
             energyTextB.color = !isA ? activeTextColor : inactiveTextColor;
         }
@@ -737,16 +905,6 @@ public class Game : NetworkBehaviour
         } else {
             if (hpSliderB) hpSliderB.value = (float)value / maxHealth;
             if (hpTextB) hpTextB.text = $"HP: {value}";
-        }
-    }
-    
-    private void UpdateCellTimers() {
-        // 服务器端简单的计时器更新，实际可以通过 NetworkTime 优化，暂时先跑通
-        if (!IsServer) return;
-        for (int x = 0; x < width; x++) {
-            for (int y = 0; y < height; y++) {
-                if (grid[x, y].lockTimer > 0) grid[x, y].lockTimer -= Time.deltaTime;
-            }
         }
     }
 
@@ -783,6 +941,10 @@ private void SetupCamera()
         if (targetCell.hasTower && targetCell.towerOwner == enemy)
         {
             totalDamage += damageTowerDirect;
+            if (!targetCell.isTowerRevealed) {
+                targetCell.isTowerRevealed = true;
+                SyncCell(targetCell); 
+            }
             Debug.Log("攻击敌方塔！受到反伤！");
         }
 
@@ -792,16 +954,16 @@ private void SetupCamera()
             for (int y = -1; y <= 1; y++)
             {
                 if (x == 0 && y == 0) continue; // 中心点上面已经算过了（或者不是塔）
-
-                int checkX = targetCell.position.x + x;
-                int checkY = targetCell.position.y + y;
-
-                if (grid.TryGetCell(checkX, checkY, out Cell neighbor))
+                if (grid.TryGetCell(targetCell.position.x + x, targetCell.position.y + y, out Cell neighbor))
                 {
                     // 如果旁边有敌人的塔
                     if (neighbor.hasTower && neighbor.towerOwner == enemy)
                     {
                         totalDamage += damageTowerAOE;
+                        if (!neighbor.isTowerRevealed) {
+                            neighbor.isTowerRevealed = true;
+                            SyncCell(neighbor); 
+                        }
                     }
                 }
             }
@@ -810,18 +972,93 @@ private void SetupCamera()
         // 3. 执行扣血
         if (totalDamage > 0)
         {
-            TakeDamage(attacker, totalDamage);
+            ModifyHP(attacker, totalDamage);
         }
 
         return totalDamage;
     }
 
+
+    private void EndTurn()
+    {
+        // 1. 检查通路连通性 (若连通则造成伤害)
+        if (CheckPathConnection(Cell.Owner.PlayerA))
+        {
+            Debug.Log("P1 通路连通！重创 P2！");
+            ModifyHP(Cell.Owner.PlayerB, damageRoadConnected);
+        }
+        if (CheckPathConnection(Cell.Owner.PlayerB))
+        {
+            Debug.Log("P2 通路连通！重创 P1！");
+            ModifyHP(Cell.Owner.PlayerA, damageRoadConnected);
+        }
+
+        // 2. 切换回合
+        totalTurnCount.Value++;
+        
+        if (currentTurn.Value == Cell.Owner.PlayerA)
+            currentTurn.Value = Cell.Owner.PlayerB;
+        else
+            currentTurn.Value = Cell.Owner.PlayerA;
+    }
+    private bool CheckPathConnection(Cell.Owner player)
+    {
+        // 定义起点和终点
+        // P1: 左下(0,0) -> 右上(width-1, height-1)
+        // P2: 右上(width-1, height-1) -> 左下(0,0)
+        // 只要能从己方基地连到敌方基地就算通
+        
+        Vector2Int startPos = (player == Cell.Owner.PlayerA) ? new Vector2Int(0, 0) : new Vector2Int(width - 1, height - 1);
+        Vector2Int targetPos = (player == Cell.Owner.PlayerA) ? new Vector2Int(width - 1, height - 1) : new Vector2Int(0, 0);
+
+        // 如果起点或终点不属于自己，直接断开
+        if (grid[startPos.x, startPos.y].owner != player) return false;
+        if (grid[targetPos.x, targetPos.y].owner != player) return false;
+
+        // BFS 搜索
+        System.Collections.Generic.Queue<Vector2Int> queue = new System.Collections.Generic.Queue<Vector2Int>();
+        System.Collections.Generic.HashSet<Vector2Int> visited = new System.Collections.Generic.HashSet<Vector2Int>();
+
+        queue.Enqueue(startPos);
+        visited.Add(startPos);
+
+        while (queue.Count > 0)
+        {
+            Vector2Int current = queue.Dequeue();
+            if (current == targetPos) return true; // 找到通路
+
+            // 检查上下左右
+            Vector2Int[] dirs = { Vector2Int.up, Vector2Int.down, Vector2Int.left, Vector2Int.right };
+            foreach (var dir in dirs)
+            {
+                Vector2Int next = current + dir;
+                
+                // 越界检查
+                if (next.x < 0 || next.x >= width || next.y < 0 || next.y >= height) continue;
+                
+                // 访问检查
+                if (visited.Contains(next)) continue;
+
+                // 核心条件：必须是自己的领地，且不是废墟
+                Cell neighbor = grid[next.x, next.y];
+                if (neighbor.owner == player && !neighbor.isBedrock)
+                {
+                    visited.Add(next);
+                    queue.Enqueue(next);
+                }
+            }
+        }
+        return false;
+    }
+
     // 获取当前客户端是 P1 还是 P2
     private Cell.Owner GetLocalPlayerIdentity()
     {
-        if (IsHost) return Cell.Owner.PlayerA;
-        if (IsClient) return Cell.Owner.PlayerB; // 注意：Host 也是 Client，但 Host 判定优先
-        return Cell.Owner.None;
+        // 获取本地玩家的唯一 ID
+        ulong myId = NetworkManager.Singleton.LocalClientId;
+        
+        // 约定：ID 为 0 的（Host）是 PlayerA，其他（Client）是 PlayerB
+        return (myId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
     }
 
 }

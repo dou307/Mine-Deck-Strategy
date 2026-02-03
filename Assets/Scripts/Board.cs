@@ -6,11 +6,16 @@ public class Board : MonoBehaviour
 {
     public Tilemap tilemap { get; private set; }
 
+    [Header("基础图块")]
     public Tile tileUnknown;
     public Tile tileEmpty;
     public Tile tileMine;
     public Tile tileExploded;
     public Tile tileFlag;
+    public Tile tileBedrock; // 新增：焦土/废墟图块 (黑色或碎石)
+    public Tile tileTrap;    // 新增：己方可见的陷阱图块
+
+    [Header("数字图块")]
     public Tile tileNum1;
     public Tile tileNum2;
     public Tile tileNum3;
@@ -20,15 +25,16 @@ public class Board : MonoBehaviour
     public Tile tileNum7;
     public Tile tileNum8;
 
+    [Header("建筑图块")]
     public Tile tileRedTower;
     public Tile tileBlueTower;
 
-    //定义玩家颜色
-    public Color colorPlayerA = new Color(1f, 0.5f, 0.5f);//淡红色
-    public Color colorPlayerB = new Color(0.5f, 0.5f, 1f);//淡蓝色
+    [Header("颜色配置")]
+    public Color colorPlayerA = new Color(1f, 0.5f, 0.5f); // 红
+    public Color colorPlayerB = new Color(0.5f, 0.5f, 1f); // 蓝
     public Color colorNone = Color.white;
-    public Color colorLocked = Color.yellow;//黄色表示锁定中
-
+    public Color colorLocked = Color.gray; // 冷却中变灰
+    public Color colorDamaged = new Color(0.7f, 0.7f, 0.7f); // 耐久度下降变暗
     private void Awake()
     {
         tilemap = GetComponent<Tilemap>();
@@ -38,71 +44,108 @@ public class Board : MonoBehaviour
     {
         int width = grid.Width;
         int height = grid.Height;
-        int midX = width / 2; // 分界线
-
-        // 【修正1】定义“前3个回合”：双方各动3次 = 总计6个Turn
-        // 如果 currentTurn <= 6，说明还是盲眼阶段
-        // 如果 currentTurn > 6，说明迷雾散开，进入“势力图”阶段
-        bool isBlindPhase = currentTurn <= 6;
+        int midX = width / 2;
+        bool isFogPhase = currentTurn <= 6;
 
         for (int x = 0; x < width; x++)
         {
-            for (int y = -3; y < height + 3; y++) // 渲染范围
+            for (int y = 0; y < height; y++) // 修正了y的范围
             {
                 if (!grid.InBounds(x, y)) continue;
 
                 Cell cell = grid[x, y];
                 Vector3Int pos = cell.position;
                 
-                // 1. 判断是否在敌方半场 (相对于观看者)
-                bool isEnemySide = false;
-                if (viewer == Cell.Owner.PlayerA && x >= midX) isEnemySide = true;      // P1看右边
-                else if (viewer == Cell.Owner.PlayerB && x < midX) isEnemySide = true; // P2看左边
+                // 1. 迷雾判断
+                bool isFogged = false;
+                if (isFogPhase)
+                {
+                    if (viewer == Cell.Owner.PlayerA && x >= midX) isFogged = true;
+                    if (viewer == Cell.Owner.PlayerB && x < midX) isFogged = true;
+                }
 
-                // 2. 准备绘制参数
-                Tile tileToDraw = null;
+                Tile tileToDraw = tileUnknown;
                 Color colorToDraw = colorNone;
 
-                // --- 逻辑分支 A：敌方半场 ---
-                if (isEnemySide)
+                // --- A. 废墟判断 (最高优先级) ---
+                if (cell.isBedrock)
                 {
-                    if (isBlindPhase)
+                    tilemap.SetTile(pos, tileBedrock);
+                    tilemap.SetTileFlags(pos, TileFlags.None);
+                    tilemap.SetColor(pos, Color.white);
+                    continue; 
+                }
+
+                // --- B. 确定防御塔可见性 ---
+                // 逻辑：自己的塔始终可见，敌人的塔只有在 isTowerRevealed 时可见
+                bool canSeeTower = false;
+                if (cell.hasTower)
+                {
+                    if (cell.towerOwner == viewer || cell.isTowerRevealed)
+                        canSeeTower = true;
+                }
+
+                if (isFogged)
+                {
+                    tileToDraw = tileUnknown;
+                    colorToDraw = colorNone;
+                }
+                // --- C. 防御塔显示 (高优先级，覆盖插旗) ---
+                else if (canSeeTower)
+                {
+                    tileToDraw = (cell.towerOwner == Cell.Owner.PlayerA) ? tileRedTower : tileBlueTower;
+                    colorToDraw = GetPlayerColor(cell.owner);
+                }
+                // --- D. 已翻开格子的显示 ---
+                else if (cell.revealed)
+                {
+                    if (cell.owner == viewer)
                     {
-                        // 阶段一：完全看不见 (前3轮)
-                        tileToDraw = null; 
+                        // 自己的地盘：看到完整信息（数字/陷阱等）
+                        tileToDraw = GetFullDetailTile(cell);
+                    }
+                    else if (cell.owner != Cell.Owner.None)
+                    {
+                        // 敌人的地盘：如果塔没被发现（到这一步说明 canSeeTower 为 false）
+                        // 则隐藏数字和塔，显示为“未知”图块，但保留占领颜色
+                        tileToDraw = tileUnknown;
                     }
                     else
                     {
-                        // 阶段二：势力迷雾 (3轮后)
-                        // 【修正2】不管下面有什么（塔、雷、数字），统统只画“未知方块”
-                        tileToDraw = tileUnknown;
-
-                        // 【修正2】只显示颜色（所有权）
-                        // 如果对方占了，显示对方颜色；如果是无主的，显示白色
-                        if (cell.owner == Cell.Owner.PlayerA) colorToDraw = colorPlayerA;
-                        else if (cell.owner == Cell.Owner.PlayerB) colorToDraw = colorPlayerB;
-                        else colorToDraw = colorNone;
-                        
-                        // 锁定状态依然可以显示（可选，如果想彻底保密也可以去掉）
-                        if (cell.lockTimer > 0) colorToDraw = colorLocked;
+                        // 无主之地
+                        tileToDraw = GetFullDetailTile(cell);
                     }
+                    colorToDraw = GetPlayerColor(cell.owner);
                 }
-                // --- 逻辑分支 B：己方半场 (或者旁观者) ---
+                // --- E. 未翻开格子的显示 (含插旗判断) ---
                 else
                 {
-                    // 正常逻辑：显示所有细节（数字、塔、插旗等）
-                    tileToDraw = GetTile(cell);
+                    // 只有在不显示塔的情况下，才去判断插旗
+                    bool myFlag = (viewer == Cell.Owner.PlayerA) ? cell.flaggedP1 : cell.flaggedP2;
                     
-                    // 正常颜色逻辑
-                    if (cell.lockTimer > 0) colorToDraw = colorLocked;
-                    else if (cell.owner == Cell.Owner.PlayerA) colorToDraw = colorPlayerA;
-                    else if (cell.owner == Cell.Owner.PlayerB) colorToDraw = colorPlayerB;
-                    else colorToDraw = colorNone;
+                    if (myFlag) tileToDraw = tileFlag;
+                    else tileToDraw = tileUnknown;
+
+                    // 未翻开的格子如果是被占领状态（比如盲注建塔后），也要显示颜色
+                    colorToDraw = GetPlayerColor(cell.owner);
                 }
 
-                // 3. 执行绘制
+                // --- F. 状态修饰 (冷却与耐久) ---
+                if (!isFogged)
+                {
+                    if (cell.unlockTurn > currentTurn)
+                        colorToDraw = Color.Lerp(colorToDraw, colorLocked, 0.5f);
+
+                    if (cell.currentDurability < cell.maxDurability) 
+                    {
+                        float damageRatio = 1f - ((float)cell.currentDurability / cell.maxDurability);
+                        colorToDraw = Color.Lerp(colorToDraw, Color.black, damageRatio * 0.4f);
+                    }
+                }
+
+                // 执行绘制
                 tilemap.SetTile(pos, tileToDraw);
-                if (tileToDraw != null) // 只有画了东西才设颜色
+                if (tileToDraw != null)
                 {
                     tilemap.SetTileFlags(pos, TileFlags.None);
                     tilemap.SetColor(pos, colorToDraw);
@@ -110,38 +153,32 @@ public class Board : MonoBehaviour
             }
         }
     }
-     private Tile GetTile(Cell cell)
+    // 获取完全信息的图块 (自己视角)
+    private Tile GetFullDetailTile(Cell cell)
     {
-        // --- 新增：防御塔渲染优先级最高 ---
-        if (cell.hasTower) {
-            return cell.towerOwner == Cell.Owner.PlayerA ? tileRedTower : tileBlueTower;
-        }
-
-        if (cell.revealed) {
-            return GetRevealedTile(cell);
-        } else if (cell.flagged) {
-            return tileFlag;
-        } else if (cell.chorded) {
-            return tileEmpty;
-        } else {
-            return tileUnknown;
-        }
-    }
-
-    private Tile GetRevealedTile(Cell cell)
-    {
+        if (cell.hasTower) return (cell.towerOwner == Cell.Owner.PlayerA) ? tileRedTower : tileBlueTower;
+        if (cell.hasTrap) return tileTrap; // 自己能看到陷阱
+        if (cell.exploded) return tileExploded;
+        if (cell.type == Cell.Type.Mine) return tileMine; // 正常游戏不显示，调试用
+        
         switch (cell.type)
         {
             case Cell.Type.Empty: return tileEmpty;
-            case Cell.Type.Mine: return cell.exploded ? tileExploded : tileMine;
-            case Cell.Type.Number: return GetNumberTile(cell);
-            default: return null;
+            case Cell.Type.Number: return GetNumberTile(cell.number);
+            default: return tileUnknown;
         }
     }
 
-    private Tile GetNumberTile(Cell cell)
+    private Color GetPlayerColor(Cell.Owner owner)
     {
-        switch (cell.number)
+        if (owner == Cell.Owner.PlayerA) return colorPlayerA;
+        if (owner == Cell.Owner.PlayerB) return colorPlayerB;
+        return colorNone;
+    }
+
+    private Tile GetNumberTile(int number)
+    {
+        switch (number)
         {
             case 1: return tileNum1;
             case 2: return tileNum2;
@@ -154,5 +191,4 @@ public class Board : MonoBehaviour
             default: return null;
         }
     }
-
 }

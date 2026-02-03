@@ -20,13 +20,15 @@ public class CellGrid
                 cells[x, y] = new Cell
                 {
                     position = new Vector3Int(x, y, 0),
-                    type = Cell.Type.Empty
+                    type = Cell.Type.Empty,
+                    // 初始化耐久度
+                    maxDurability = 3,
+                    currentDurability = 3,
+                    isBedrock = false
                 };
             }
         }
     }
-
-// 在 CellGrid 类中
 
 public void GenerateMines(Cell firstClickCell, int totalMines)
 {
@@ -136,19 +138,12 @@ private void GenerateRandomMinesInRect(RectInt area, int count, RectInt excludeZ
 
     public void GenerateNumbers()
     {
-        int width = Width;
-        int height = Height;
-
-        for (int x = 0; x < width; x++)
+        for (int x = 0; x < Width; x++)
         {
-            for (int y = 0; y < height; y++)
+            for (int y = 0; y < Height; y++)
             {
                 Cell cell = cells[x, y];
-
-                if (cell.type == Cell.Type.Mine) {
-                    continue;
-                }
-
+                if (cell.type == Cell.Type.Mine) continue;
                 cell.number = CountAdjacentMines(cell);
                 cell.type = cell.number > 0 ? Cell.Type.Number : Cell.Type.Empty;
             }
@@ -158,75 +153,17 @@ private void GenerateRandomMinesInRect(RectInt area, int count, RectInt excludeZ
     public int CountAdjacentMines(Cell cell)
     {
         int count = 0;
-
-        for (int adjacentX = -1; adjacentX <= 1; adjacentX++)
-        {
-            for (int adjacentY = -1; adjacentY <= 1; adjacentY++)
-            {
-                if (adjacentX == 0 && adjacentY == 0) {
-                    continue;
-                }
-
-                int x = cell.position.x + adjacentX;
-                int y = cell.position.y + adjacentY;
-
-                if (TryGetCell(x, y, out Cell adjacent) && adjacent.type == Cell.Type.Mine) {
+        for (int x = -1; x <= 1; x++) {
+            for (int y = -1; y <= 1; y++) {
+                if (x == 0 && y == 0) continue;
+                if (TryGetCell(cell.position.x + x, cell.position.y + y, out Cell adj) && adj.type == Cell.Type.Mine)
                     count++;
-                }
             }
         }
-
         return count;
     }
 
-    public int CountAdjacentFlags(Cell cell)
-    {
-        int count = 0;
-
-        for (int adjacentX = -1; adjacentX <= 1; adjacentX++)
-        {
-            for (int adjacentY = -1; adjacentY <= 1; adjacentY++)
-            {
-                if (adjacentX == 0 && adjacentY == 0) {
-                    continue;
-                }
-
-                int x = cell.position.x + adjacentX;
-                int y = cell.position.y + adjacentY;
-
-                if (TryGetCell(x, y, out Cell adjacent) && !adjacent.revealed && adjacent.flagged) {
-                    count++;
-                }
-            }
-        }
-
-        return count;
-    }
-
-    public Cell GetCell(int x, int y)
-    {
-        if (InBounds(x, y)) {
-            return cells[x, y];
-        } else {
-            return null;
-        }
-    }
-
-    public bool TryGetCell(int x, int y, out Cell cell)
-    {
-        cell = GetCell(x, y);
-        return cell != null;
-    }
-
-    public bool InBounds(int x, int y)
-    {
-        return x >= 0 && x < Width && y >= 0 && y < Height;
-    }
-
-    public bool IsAdjacent(Cell a, Cell b)
-    {
-        return Mathf.Abs(a.position.x - b.position.x) <= 1 &&
-               Mathf.Abs(a.position.y - b.position.y) <= 1;
-    }
-
+    public Cell GetCell(int x, int y) => InBounds(x, y) ? cells[x, y] : null;
+    public bool TryGetCell(int x, int y, out Cell cell) { cell = GetCell(x, y); return cell != null; }
+    public bool InBounds(int x, int y) => x >= 0 && x < Width && y >= 0 && y < Height;
 }
