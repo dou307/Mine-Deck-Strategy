@@ -99,6 +99,44 @@ public class LobbyManager : MonoBehaviour
         }
     }
 
+    // --- 【新增】功能 3: 更新房间名称 ---
+    public void UpdateRoomName(string joinCode, string newName)
+    {
+        StartCoroutine(UpdateRoomNameCoroutine(joinCode, newName));
+    }
+
+    private IEnumerator UpdateRoomNameCoroutine(string joinCode, string newName)
+    {
+        // 构造 JSON 数据：只修改 room_name
+        string json = $"{{\"room_name\": \"{newName}\"}}";
+
+        // URL 格式：.../rooms?join_code=eq.XXXXX (意思是：找到 join_code 等于 XXXXX 的那一行)
+        string url = $"{supabaseUrl}/rest/v1/rooms?join_code=eq.{joinCode}";
+
+        using (UnityWebRequest request = new UnityWebRequest(url, "PATCH"))
+        {
+            byte[] bodyRaw = Encoding.UTF8.GetBytes(json);
+            request.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            request.downloadHandler = new DownloadHandlerBuffer();
+
+            // 设置 Header
+            request.SetRequestHeader("Content-Type", "application/json");
+            request.SetRequestHeader("apikey", supabaseKey);
+            request.SetRequestHeader("Authorization", "Bearer " + supabaseKey);
+
+            yield return request.SendWebRequest();
+
+            if (request.result == UnityWebRequest.Result.Success)
+            {
+                Debug.Log($"【Lobby】改名成功！新名字: {newName}");
+            }
+            else
+            {
+                Debug.LogError($"【Lobby】改名失败: {request.error}\n{request.downloadHandler.text}");
+            }
+        }
+    }
+
     // --- 简单的 JSON 数组解析工具 ---
     public static List<T> ParseJsonArray<T>(string json)
     {

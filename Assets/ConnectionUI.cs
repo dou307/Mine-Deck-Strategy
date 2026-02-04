@@ -1,115 +1,85 @@
 using UnityEngine;
-using UnityEngine.UI;
 using TMPro;
+using UnityEngine.UI;
 using Unity.Netcode;
-using Unity.Netcode.Transports.UTP;
 using Unity.Services.Core;
 using Unity.Services.Authentication;
 using Unity.Services.Relay;
 using Unity.Services.Relay.Models;
+using Unity.Netcode.Transports.UTP;
+using System.Collections.Generic; // 必须引用
 
 public class ConnectionUI : MonoBehaviour
 {
-    [Header("UI 组件")]
-    public Button hostBtn;       
-    public Button clientBtn;     
-    public TMP_InputField joinCodeInput; 
-    public TextMeshProUGUI joinCodeText; 
-    
-    // 【新增】用于显示 "Waiting for the Client..." 的文本组件
-    public TextMeshProUGUI statusText;   
-    
-    public GameObject panel;     
-    public LobbyManager lobbyManager;
+    [Header("UI References")]
+    public GameObject panel;
+    public GameObject waitingPanel;
+    public TMP_Text codeText;
+    public TMP_InputField joinInput;
 
-    private async void Start()
+    public TMP_InputField renameInput;
+    
+    [Header("Lobby UI")]
+    public Transform roomListContent; // 列表容器 (ScrollView 的 Content)
+    public GameObject roomItemPrefab; // 房间模版 (刚才做的 Button)
+    public Button refreshButton;      // 刷新按钮 (你需要新建一个或者用代码自动刷新)
+    private string currentJoinCode;
+
+    [Header("Managers")]
+    public LobbyManager lobbyManager; // 记得拖拽赋值
+
+    private void Start()
     {
-        await UnityServices.InitializeAsync();
-
-        if (!AuthenticationService.Instance.IsSignedIn)
+        InitializeServices();
+        if (refreshButton != null)
         {
-            await AuthenticationService.Instance.SignInAnonymouslyAsync();
-        }
-
-        hostBtn.onClick.AddListener(CreateRelayGame);
-        clientBtn.onClick.AddListener(JoinRelayGame);
-
-        // 【关键】订阅 NetworkManager 的连接事件
-        // 当有客户端连接成功时，Unity 会自动调用 OnClientConnected 这个方法
-        if (NetworkManager.Singleton != null)
-        {
-            NetworkManager.Singleton.OnClientConnectedCallback += OnClientConnected;
+            refreshButton.onClick.AddListener(OnRefreshClicked);
         }
     }
 
-    // --- 这是一个回调函数，当有人连上时自动触发 ---
-    private void OnClientConnected(ulong clientId)
-    {
-        // NetworkManager.Singleton.IsHost: 判断当前是房主还是客户端
-        
-        if (NetworkManager.Singleton.IsHost)
-        {
-            // 如果我是房主
-            // clientId = 0 是房主自己，clientId = 1 是第一个进来的客人
-            // 只有当 clientId != 0 (说明是别人进来了)，我们才开始游戏
-            if (clientId != 0) 
-            {
-                Debug.Log($"玩家 {clientId} 已加入，游戏开始！");
-                HideUI(); // 房主隐藏 UI，进入游戏
-            }
-        }
-        else 
-        {
-            // 如果我是客户端
-            // 只要连上了，就说明进入房间成功了，直接隐藏 UI
-            Debug.Log("连接主机成功，进入游戏！");
-            HideUI(); 
-        }
-    }
-    
-    //记得在脚本销毁时取消订阅，防止报错
-    private void OnDestroy() 
-    {
-        if (NetworkManager.Singleton != null)
-        {
-            NetworkManager.Singleton.OnClientConnectedCallback -= OnClientConnected;
-        }
-    }
-
-    // --- Host 逻辑 ---
-    private async void CreateRelayGame()
+    private async void InitializeServices()
     {
         try
         {
-            // 1. 禁用按钮，防止重复点击
-            hostBtn.interactable = false;
-            clientBtn.interactable = false;
+            await UnityServices.InitializeAsync();
+            if (!AuthenticationService.Instance.IsSignedIn)
+            {
+                await AuthenticationService.Instance.SignInAnonymouslyAsync();
+            }
+            Debug.Log("Unity Services 初始化完成, ID: " + AuthenticationService.Instance.PlayerId);
             
-            // 2. 更新状态文本
-            if(statusText) statusText.text = "Creating Room...";
+            // 初始化完成后，自动刷新一次列表
+            RefreshRoomList(); 
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError("初始化失败: " + e);
+        }
+    }
 
-            Allocation allocation = await RelayService.Instance.CreateAllocationAsync(1);
-            string joinCode = await RelayService.Instance.GetJoinCodeAsync(allocation.AllocationId);
+    // --- Host 流程 ---
+    public async void OnHostClicked()
+    {
+        try
+        {
+            Allocation allocation = await RelayService.Instance.CreateAllocationAsync(2);
             
-            // 3. 界面更新：显示房间号 + 等待提示
-            Debug.Log("房间号: " + joinCode);
+            currentJoinCode = await RelayService.Instance.GetJoinCodeAsync(allocation.AllocationId);
+            Debug.Log("房间创建成功, Code: " + currentJoinCode);
+            if (codeText != null) codeText.text = "Code: " + currentJoinCode;
 
+            // 上传到 Supabase
             if (lobbyManager != null)
             {
-                // 房间名可以先写死，以后做输入框
                 string roomName = "Player " + UnityEngine.Random.Range(100, 999) + "'s Room";
-                lobbyManager.PostRoom(joinCode, roomName);
+                lobbyManager.PostRoom(currentJoinCode, roomName);
             }
-            if(joinCodeText) joinCodeText.text = "Code: " + joinCode;
-            
-            // 自动复制方便测试
-            GUIUtility.systemCopyBuffer = joinCode; 
-            
-            // 【重点】更新下面的状态文字
-            if(statusText) statusText.text = "Waiting for the Client...";
 
-            var transport = NetworkManager.Singleton.GetComponent<UnityTransport>();
-            transport.SetHostRelayData(
+            if (panel != null) panel.SetActive(false);
+            
+            if (waitingPanel != null) waitingPanel.SetActive(true);
+
+            NetworkManager.Singleton.GetComponent<UnityTransport>().SetHostRelayData(
                 allocation.RelayServer.IpV4,
                 (ushort)allocation.RelayServer.Port,
                 allocation.AllocationIdBytes,
@@ -118,36 +88,32 @@ public class ConnectionUI : MonoBehaviour
             );
 
             NetworkManager.Singleton.StartHost();
-            
-            // 【注意】这里不再调用 HideUI()！
-            // UI 会一直显示，直到 OnClientConnected 检测到有人进来
+            HideUI();
         }
         catch (System.Exception e)
         {
-            Debug.LogError("创建房间失败: " + e.Message);
-            // 失败了记得把按钮恢复
-            hostBtn.interactable = true;
-            clientBtn.interactable = true;
-            if(statusText) statusText.text = "Error: " + e.Message;
+            Debug.LogError("Host 失败: " + e);
         }
     }
 
-    // --- Client 逻辑 ---
-    private async void JoinRelayGame()
+    // --- Join 流程 (旧版手动输入) ---
+    public async void OnJoinClicked()
     {
-        string code = joinCodeInput.text.Trim();
-        if (string.IsNullOrEmpty(code)) return;
+        string code = joinInput.text;
+        JoinRelayGame(code);
+    }
+
+    // --- Join 流程 (新版列表点击) ---
+    private async void JoinRelayGame(string joinCode)
+    {
+        if (string.IsNullOrEmpty(joinCode)) return;
 
         try
         {
-            hostBtn.interactable = false;
-            clientBtn.interactable = false;
-            if(statusText) statusText.text = "Connecting...";
+            Debug.Log("正在加入房间: " + joinCode);
+            JoinAllocation joinAllocation = await RelayService.Instance.JoinAllocationAsync(joinCode);
 
-            JoinAllocation joinAllocation = await RelayService.Instance.JoinAllocationAsync(code);
-
-            var transport = NetworkManager.Singleton.GetComponent<UnityTransport>();
-            transport.SetClientRelayData(
+            NetworkManager.Singleton.GetComponent<UnityTransport>().SetClientRelayData(
                 joinAllocation.RelayServer.IpV4,
                 (ushort)joinAllocation.RelayServer.Port,
                 joinAllocation.AllocationIdBytes,
@@ -157,21 +123,107 @@ public class ConnectionUI : MonoBehaviour
             );
 
             NetworkManager.Singleton.StartClient();
-            
-            // Client 也不需要立即 HideUI，
-            // StartClient 成功后会触发 OnClientConnected，那里会处理 UI 隐藏
+            HideUI();
         }
         catch (System.Exception e)
         {
-            Debug.LogError("加入房间失败: " + e.Message);
-            hostBtn.interactable = true;
-            clientBtn.interactable = true;
-            if(statusText) statusText.text = "Join Failed!";
+            Debug.LogError("加入失败: " + e);
         }
+    }
+
+    // --- 房间列表逻辑 ---
+    public void RefreshRoomList()
+    {
+        if (lobbyManager == null) return;
+        
+        // 绑定回调：当数据回来时，执行 UpdateUI
+        lobbyManager.OnRoomListFetched = UpdateListUI;
+        // 发起请求
+        lobbyManager.FetchRooms();
+    }
+
+    private void UpdateListUI(List<RoomData> rooms)
+    {
+        // 1. 清空旧按钮
+        foreach (Transform child in roomListContent)
+        {
+            Destroy(child.gameObject);
+        }
+
+        // 2. 生成新按钮
+        foreach (var room in rooms)
+        {
+            GameObject newItem = Instantiate(roomItemPrefab, roomListContent);
+            
+            // 设置文字
+            TMP_Text t = newItem.GetComponentInChildren<TMP_Text>();
+            if (t) t.text = $"{room.room_name} (点击加入)";
+
+            // 设置点击事件 (Lambda表达式闭包)
+            Button b = newItem.GetComponent<Button>();
+            if (b) 
+            {
+                b.onClick.AddListener(() => {
+                    JoinRelayGame(room.join_code);
+                });
+            }
+        }
+    }
+
+    // --- 【新增】候机室改名按钮点击事件 ---
+    public void OnRenameClicked()
+    {
+        // 1. 检查输入如果不为空
+        if (renameInput != null && !string.IsNullOrEmpty(renameInput.text))
+        {
+            string newName = renameInput.text;
+            
+            // 2. 调用 LobbyManager 发送更新请求
+            if (lobbyManager != null && !string.IsNullOrEmpty(currentJoinCode))
+            {
+                lobbyManager.UpdateRoomName(currentJoinCode, newName);
+                Debug.Log("正在请求修改房间名为: " + newName);
+            }
+        }
+    }
+
+    // --- 【新增】刷新按钮点击逻辑 ---
+    private void OnRefreshClicked()
+    {
+        // 1. 禁用按钮 (防止连续点击)
+        if (refreshButton != null) refreshButton.interactable = false;
+
+        Debug.Log("正在刷新房间列表...");
+
+        // 2. 调用刷新
+        RefreshRoomList();
+
+        // 3. 延迟 2 秒后恢复按钮 (协程)
+        StartCoroutine(ResetRefreshButton());
+    }
+
+    private System.Collections.IEnumerator ResetRefreshButton()
+    {
+        yield return new WaitForSeconds(2.0f); // 冷却时间 2秒
+        if (refreshButton != null) refreshButton.interactable = true;
     }
 
     private void HideUI()
     {
         if (panel != null) panel.SetActive(false);
     }
-}
+    public void OnBackToMenuClicked()
+    {
+        // 1. 断开网络连接 (这非常重要！)
+        if (NetworkManager.Singleton != null)
+        {
+            NetworkManager.Singleton.Shutdown();
+        }
+
+        // 2. 重新加载当前场景 (最简单的重置方法)
+        // 这样所有的变量、UI状态都会恢复到刚打开游戏的样子
+        UnityEngine.SceneManagement.SceneManager.LoadScene(
+            UnityEngine.SceneManagement.SceneManager.GetActiveScene().name
+        );
+    }
+    }

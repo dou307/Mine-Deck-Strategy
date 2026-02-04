@@ -70,7 +70,14 @@ public class Game : NetworkBehaviour
     public Color activeTextColor = Color.white;
     public Color inactiveTextColor = Color.gray;
 
-    public GameObject gameHUD;
+    [Header("UI 控制")]
+    public GameObject gameHUD;      // 游戏界面
+
+    public GameObject gridParent; // 【新增】用来控制地图/格子的父物体
+    public GameObject waitingPanel; // 【新增】用来在游戏开始时关闭它
+
+    public GameObject gameOverPanel; 
+    public TMPro.TMP_Text winnerText;
 
     // 内部引用
     private Board board;
@@ -101,11 +108,14 @@ public class Game : NetworkBehaviour
     // 6. 替代 Start()，这是网络对象的初始化入口
     public override void OnNetworkSpawn()
     {
-        if (gameHUD != null) gameHUD.SetActive(true);
+        if (gameHUD != null) gameHUD.SetActive(false);
+        if (gridParent != null) gridParent.SetActive(false);
+        if (waitingPanel != null && IsServer) waitingPanel.SetActive(true); // Host 确保看到等待界面
         // 只有服务器负责初始化真正的游戏逻辑
         if (IsServer)
         {
             NewGame();
+            NetworkManager.Singleton.OnClientConnectedCallback += OnClientConnected;
         }
         else
         {
@@ -133,6 +143,29 @@ public class Game : NetworkBehaviour
         };
 
         SetupCamera();
+    }
+
+    // 【新增】服务器监听连接的回调
+    private void OnClientConnected(ulong clientId)
+    {
+        // 检查当前房间人数
+        // 注意：ConnectedClientsIds 包含了 Host 和所有 Client
+        if (NetworkManager.Singleton.ConnectedClientsIds.Count >= 2)
+        {
+            Debug.Log("玩家已凑齐，开始游戏！");
+            // 广播给所有人：显示游戏界面
+            StartMatchClientRpc();
+        }
+    }
+
+    // 【新增】记得在销毁时取消监听，防止报错
+    public override void OnNetworkDespawn()
+    {
+        if (IsServer)
+        {
+            NetworkManager.Singleton.OnClientConnectedCallback -= OnClientConnected;
+        }
+        base.OnNetworkDespawn();
     }
 
     private void NewGame()
@@ -261,6 +294,22 @@ public class Game : NetworkBehaviour
     // -----------------------------------------------------------------------
 
     // [ServerRpc]：客户端调用，服务器执行
+
+    [ClientRpc]
+    private void StartMatchClientRpc()
+    {
+        // 所有人（Host 和 Client）同时执行：
+
+        // 1. 关闭候机室
+        if (waitingPanel != null) waitingPanel.SetActive(false);
+
+        // 2. 显示游戏界面
+        if (gameHUD != null) gameHUD.SetActive(true);
+
+        if (gridParent != null) gridParent.SetActive(true);
+
+        Debug.Log("游戏界面已显示，Battle Start!");
+    }
 
     [ServerRpc(RequireOwnership = false)]
     private void RequestActionServerRpc(int x, int y, string action, ServerRpcParams rpc = default)
@@ -756,15 +805,23 @@ private bool ProcessReveal(Cell.Owner player, Cell cell)
     [ClientRpc]
     private void GameOverClientRpc(Cell.Owner winner)
     {
+        // 1. 锁定游戏状态
         gameover = true;
         Debug.Log($"游戏结束！获胜者是: {winner}");
         
-        // 这里你可以做更复杂的 UI，比如弹出一个 Panel 显示胜利者
-        // 比如：uiManager.ShowWinPanel(winner);
-        
-        // 简单起见，先把所有雷显示出来（给输家看个明白）
-        // 注意：这是客户端本地显示，服务器不需要再发包了，因为游戏都结束了
-        // 或者你可以请求服务器 RevealAllMines
+        // 2. 显示黑色背景板
+        if (gameOverPanel != null) 
+        {
+            gameOverPanel.SetActive(true);
+        }
+
+        // 3. 设置胜者文字
+        if (winnerText != null)
+        {
+            // 把枚举 PlayerA 转换成更好看的 "Player 1"
+            string showName = (winner == Cell.Owner.PlayerA) ? "Player 1" : "Player 2";
+            winnerText.text = "胜者: " + showName + "!";
+        }
     }
 
     private void ExecuteFloodFillServer(Cell startCell, Cell.Owner player)
