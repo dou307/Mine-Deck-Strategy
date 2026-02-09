@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Unity WebGL Player | Mine-Deck Strategy</title>
+    <style>
+      /* 1. 全局样式重置：背景变黑，无边距，无滚动条 */
+      html, body {
+        background: #000000;
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        overflow: hidden; /* 防止出现滚动条 */
+      }
+      /* 2. Canvas 强制全屏 */
+      #unity-canvas {
+        position: absolute;
+        width: 100%;
+        height: 100%;
+        background: #231F20;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="unity-canvas" tabindex="-1"></canvas>
+    
+    <script src="Build/Build_01.loader.js"></script>
+    <script>
+      // 3. 针对移动端的视口优化（保留这部分，防止手机浏览器缩放）
+      if (/iPhone|iPad|iPod|Android/i.test(navigator.userAgent)) {
+        var meta = document.createElement('meta');
+        meta.name = 'viewport';
+        meta.content = 'width=device-width, height=device-height, initial-scale=1.0, user-scalable=no, shrink-to-fit=yes';
+        document.getElementsByTagName('head')[0].appendChild(meta);
+      }
+
+      // 注意：原本这里有一段代码是只给手机设置 canvas.style.width='100%'
+      // 现在因为我们在 <head> 的 <style> 里写了 CSS，所以电脑也会自动全屏了
+
+      createUnityInstance(document.querySelector("#unity-canvas"), {
+        dataUrl: "Build/Build_01.data.unityweb",
+        frameworkUrl: "Build/Build_01.framework.js.unityweb",
+        codeUrl: "Build/Build_01.wasm.unityweb",
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: "DefaultCompany",
+        productName: "Mine-Deck Strategy",
+        productVersion: "1.0",
+        // matchWebGLToCanvasSize: false, // 如果发现画面模糊，可以尝试取消注释这一行
+        // devicePixelRatio: 1, // 如果高分屏下太卡，可以取消注释这一行
+      });
+    </script>
+  </body>
+</html>

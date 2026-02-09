@@ -141,6 +141,13 @@ public class Board : MonoBehaviour
                         float damageRatio = 1f - ((float)cell.currentDurability / cell.maxDurability);
                         colorToDraw = Color.Lerp(colorToDraw, Color.black, damageRatio * 0.4f);
                     }
+
+                    // --- 添加：己方陷阱的高亮表现 ---
+                    if (cell.hasTrap && cell.trapOwner == viewer)
+                    {
+                        // 在原有颜色基础上叠加一层紫色调，代表这里有陷阱
+                        colorToDraw = Color.Lerp(colorToDraw,Color.green, 0.5f);
+                    }
                 }
 
                 // 执行绘制
@@ -157,7 +164,6 @@ public class Board : MonoBehaviour
     private Tile GetFullDetailTile(Cell cell)
     {
         if (cell.hasTower) return (cell.towerOwner == Cell.Owner.PlayerA) ? tileRedTower : tileBlueTower;
-        if (cell.hasTrap) return tileTrap; // 自己能看到陷阱
         if (cell.exploded) return tileExploded;
         if (cell.type == Cell.Type.Mine) return tileMine; // 正常游戏不显示，调试用
         

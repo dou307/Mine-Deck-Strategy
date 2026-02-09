@@ -41,9 +41,14 @@ public class Game : NetworkBehaviour
 
     [Header("数值配置 - 消耗与收益")]
     public int costBuildTower = 5;     // 建塔消耗
-    public int costPlaceTrap = 15;     // 【新增】埋雷消耗
     public int gainNormal = 5;         // 点数字收益
     public int gainCapture = 7;        // 抢地收益
+
+    [Header("陷阱配置")]
+    public int maxTrapsPerPlayer = 5; 
+    public int costPlaceTrap = 15; // 搬移到配置区
+    private int trapCountP1 = 0;
+    private int trapCountP2 = 0;
 
     [Header("网络变量 - 玩家属性")]
     // 对应原来的 healthA / healthB
@@ -81,9 +86,12 @@ public class Game : NetworkBehaviour
 
     // 内部引用
     private Board board;
-    private CellGrid grid;
+    public CellGrid grid;
     private bool gameover;
+    private SkillManager skillManager;
     private bool mapGenerated = false;
+    private float lastScreenWidth;
+    private float lastScreenHeight;
 
     private void Awake()
     {
@@ -108,6 +116,7 @@ public class Game : NetworkBehaviour
     // 6. 替代 Start()，这是网络对象的初始化入口
     public override void OnNetworkSpawn()
     {
+        skillManager = GetComponent<SkillManager>();
         if (gameHUD != null) gameHUD.SetActive(false);
         if (gridParent != null) gridParent.SetActive(false);
         if (waitingPanel != null && IsServer) waitingPanel.SetActive(true); // Host 确保看到等待界面
@@ -210,11 +219,12 @@ public class Game : NetworkBehaviour
             if (IsServer && Input.GetKeyDown(KeyCode.R)) NewGame();
             return;
         }
-
-        // 8. 核心修改：输入检测
-        // 我们这里做一个简单约定：Host (主机) 永远是 PlayerA，Client (加入者) 永远是 PlayerB
-        // 以后可以用 Player ID 系统做得更高级
-        
+        if (Screen.width != lastScreenWidth || Screen.height != lastScreenHeight)
+        {
+            SetupCamera();
+            lastScreenWidth = Screen.width;
+            lastScreenHeight = Screen.height;
+        }
        HandleInput(GetLocalPlayerIdentity());
     }
 
@@ -243,6 +253,22 @@ public class Game : NetworkBehaviour
         {
             // 插旗不消耗回合，所以它不走 EndTurn 流程，独立使用 RequestFlagServerRpc
             RequestFlagServerRpc(pos.x, pos.y);
+        }
+        else if (Input.GetMouseButtonDown(2))
+        {
+            RequestSkillServerRpc(SkillType.Unchord, pos.x, pos.y);
+        }
+        if (Input.GetMouseButton(2))
+        {
+            if (grid.TryGetCell(pos.x, pos.y, out Cell c)) 
+            {
+                ChordLocal(c); // 调用您已有的高亮逻辑
+            }
+        }
+        // --- 辅助视觉：中键抬起清除高亮 ---
+        if (Input.GetMouseButtonUp(2))
+        {
+            ClearAllChordedFlagsLocal();
         }
         // --- T键：建塔 ---
         else if (Input.GetKeyDown(KeyCode.T)) 
@@ -359,8 +385,9 @@ public class Game : NetworkBehaviour
 
         if (grid.TryGetCell(x, y, out Cell cell))
         {
+            bool isVisuallyRevealed = (cell.owner == sender && cell.revealed) || (cell.hasTower && (cell.towerOwner == sender || cell.isTowerRevealed));
             // 2. 规则检查：已翻开、有防御塔、或已炸开的地雷不能插旗
-            if (cell.revealed || cell.hasTower || cell.exploded) return;
+            if (isVisuallyRevealed || cell.isBedrock || cell.exploded) return;
 
             // 3. 切换状态：只修改属于该玩家的私有标记变量
             bool newState;
@@ -408,23 +435,23 @@ public class Game : NetworkBehaviour
 
 
     [ServerRpc(RequireOwnership = false)]
-    private void RequestUnchordServerRpc(int x, int y, ServerRpcParams rpcParams = default)
+    private void RequestSkillServerRpc(SkillType skillType, int x, int y, ServerRpcParams rpcParams = default)
     {
-        // 身份验证：确定是谁在尝试 Unchord
+        // 1. 身份验证
         ulong clientId = rpcParams.Receive.SenderClientId;
         Cell.Owner sender = (clientId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
-        
-        // 回合检查
+
+        // 2. 回合检查
         if (sender != currentTurn.Value) return;
 
-        if (grid.TryGetCell(x, y, out Cell cell))
+        // 3. 调用 SkillManager 执行逻辑
+        // 注意：ExecuteSkill 内部已经包含了能量检查、数量限制等判定
+        bool success = skillManager.ExecuteSkill(skillType, sender, x, y);
+
+        // 4. 如果技能释放成功，消耗回合
+        if (success)
         {
-            // 执行 Unchord 并传入身份
-            if (Unchord(sender, cell)) 
-            {
-                // 只要成功触发了翻开动作，就结束当前回合
-                EndTurn();
-            }
+            EndTurn();
         }
     }
 
@@ -504,7 +531,7 @@ public class Game : NetworkBehaviour
         }
     }
 
-private bool ProcessReveal(Cell.Owner player, Cell cell)
+public bool ProcessReveal(Cell.Owner player, Cell cell)
     {
         if (cell.owner == player) return false;
 
@@ -536,12 +563,10 @@ private bool ProcessReveal(Cell.Owner player, Cell cell)
             cell.trapOwner = Cell.Owner.None;
             
             // 扣血 10 点
-            ModifyHP(player, damageTrap); 
-            Debug.Log("踩中陷阱！行动中止。");
-            
-            // 只要踩了陷阱，回合直接结束，格子不会被占领
-            SyncCell(cell);
-            return true; 
+            ModifyHP(player, damageTrap);             
+            if (cell.trapOwner == Cell.Owner.PlayerA) trapCountP1--;
+            else trapCountP2--;
+            Debug.Log($"{player} 踩中了陷阱！受到伤害并触发了该格子。");
         }
 
         // 3. 抢地逻辑 (敌人已翻开的格子)
@@ -745,63 +770,6 @@ private bool ProcessReveal(Cell.Owner player, Cell cell)
         );
     }
 
-    // 服务端逻辑
-    private bool Unchord(Cell.Owner player, Cell center)
-    {
-        // 基础检查：只有已翻开的数字格可以触发
-        if (center == null || !center.revealed || center.type != Cell.Type.Number) return false;
-
-        // 检查：操作者自己标记的旗子 + 塔的数量 是否等于 该格子的数字
-        if (CountAdjacentFlagsAndTowers(center, player) >= center.number)
-        {
-            bool anyChange = false;
-            
-            // 遍历周围 8 个格子进行尝试翻开
-            for (int x = -1; x <= 1; x++) 
-            {
-                for (int y = -1; y <= 1; y++) 
-                {
-                    if (x == 0 && y == 0) continue;
-                    
-                    if (grid.TryGetCell(center.position.x + x, center.position.y + y, out Cell neighbor)) 
-                    {
-                        // 注意：由于旗子是私有的，对方可能在雷上没插旗。
-                        // 但这里执行的是 ProcessReveal，它内部会进行雷/陷阱/扣血的判定。
-                        if (ProcessReveal(player, neighbor)) 
-                        {
-                            anyChange = true;
-                        }
-                    }
-                }
-            }
-            return anyChange;
-        }
-        return false;
-    }
-    
-
-    
-    // 辅助函数：计算周围旗子和塔
-    private int CountAdjacentFlagsAndTowers(Cell cell, Cell.Owner actor)
-    {
-        int count = 0;
-        for (int x = -1; x <= 1; x++) {
-            for (int y = -1; y <= 1; y++) {
-                if (x == 0 && y == 0) continue;
-                if (grid.TryGetCell(cell.position.x + x, cell.position.y + y, out Cell neighbor)) {
-                    
-                    // 根据行动者身份判断他眼中的旗子
-                    bool hasFlag = (actor == Cell.Owner.PlayerA) ? neighbor.flaggedP1 : neighbor.flaggedP2;
-                    
-                    if ((!neighbor.revealed && hasFlag) || neighbor.hasTower) {
-                        count++;
-                    }
-                }
-            }
-        }
-        return count;
-    }
-
     [ClientRpc]
     private void GameOverClientRpc(Cell.Owner winner)
     {
@@ -965,28 +933,31 @@ private bool ProcessReveal(Cell.Owner player, Cell cell)
         }
     }
 
-private void SetupCamera()
-{
-    // 1. 居中逻辑不变
-    Vector3 centerPos = new Vector3(width / 2f - 0.5f, height / 2f - 0.5f, -10f);
-    Camera.main.transform.position = centerPos;
-
-    // 2. 【修改这里】不再自动计算 (height / 2f) + 2f，而是直接用你设置的变量
-    float targetSize = defaultCameraSize; 
-    
-    // 3. 保留宽屏适配逻辑（防止手机竖屏时两边显示不全）
-    // 如果屏幕特别窄，代码会自动在你的 defaultCameraSize 基础上再放大一点
-    float screenRatio = (float)Screen.width / Screen.height;
-    float targetRatio = (float)width / height;
-    
-    if (screenRatio < targetRatio)
+    private void SetupCamera()
     {
-        // 以宽度为基准反推 Size
-        targetSize = (width / 2f + 1f) / screenRatio;
-    }
+        // 1. 永远居中
+        Vector3 centerPos = new Vector3(width / 2f, height / 2f, -10f);
+        Camera.main.transform.position = centerPos;
 
-    Camera.main.orthographicSize = targetSize;
-}
+        // 2. 基础大小 (基于高度)
+        // OrthographicSize = 高度的一半。如果你的棋盘高度是 16，理论上 size = 8 刚好塞满。
+        // 加一点边距 (比如 + 2)
+        float targetSize = (height / 2f) + 1f; 
+
+        // 3. 宽度适配 (防止两边被切掉)
+        float screenRatio = (float)Screen.width / Screen.height; // 当前屏幕宽高比
+        float boardRatio = (float)width / height;              // 棋盘宽高比 (32/16 = 2.0)
+
+        // 如果屏幕比棋盘更“方”（比如手机竖屏，或者非宽屏），宽度就不够了
+        // 这时要基于宽度来反推 Size
+        if (screenRatio < boardRatio)
+        {
+            // 目标 Size = (宽度一半) / 屏幕比例
+            targetSize = (width / 2f + 2f) / screenRatio;
+        }
+
+        Camera.main.orthographicSize = targetSize;
+    }
 
     // 检查并应用防御塔伤害 (AOE + 直接攻击)
     private int CheckAndApplyTowerDefense(Cell.Owner attacker, Cell targetCell)
@@ -1116,6 +1087,23 @@ private void SetupCamera()
         
         // 约定：ID 为 0 的（Host）是 PlayerA，其他（Client）是 PlayerB
         return (myId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+    }
+
+    // 检查能量是否足够
+    public bool HasEnoughEnergy(Cell.Owner player, int amount) {
+        int currentE = (player == Cell.Owner.PlayerA) ? energyP1.Value : energyP2.Value;
+        return currentE >= amount;
+    }
+
+    // 获取陷阱数量
+    public int GetTrapCount(Cell.Owner player) {
+        return (player == Cell.Owner.PlayerA) ? trapCountP1 : trapCountP2;
+    }
+
+    // 增加陷阱计数
+    public void IncrementTrapCount(Cell.Owner player) {
+        if (player == Cell.Owner.PlayerA) trapCountP1++;
+        else trapCountP2++;
     }
 
 }

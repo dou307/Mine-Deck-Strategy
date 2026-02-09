@@ -60,39 +60,30 @@ public class ConnectionUI : MonoBehaviour
     // --- Host 流程 ---
     public async void OnHostClicked()
     {
-        try
+        // 1. 调用 RelayManager 创建房间 (它内部会自动处理 WSS 协议和 StartHost)
+        // 注意：这里假设你的 RelayManager.CreateRelay() 返回的是 Task<string> joinCode
+        string code = await RelayManager.Instance.CreateRelay();
+
+        if (!string.IsNullOrEmpty(code))
         {
-            Allocation allocation = await RelayService.Instance.CreateAllocationAsync(2);
-            
-            currentJoinCode = await RelayService.Instance.GetJoinCodeAsync(allocation.AllocationId);
+            currentJoinCode = code;
             Debug.Log("房间创建成功, Code: " + currentJoinCode);
             if (codeText != null) codeText.text = "Code: " + currentJoinCode;
 
-            // 上传到 Supabase
+            // 2. 上传到 Supabase (保留你原有的逻辑)
             if (lobbyManager != null)
             {
                 string roomName = "Player " + UnityEngine.Random.Range(100, 999) + "'s Room";
                 lobbyManager.PostRoom(currentJoinCode, roomName);
             }
 
+            // 3. UI 切换
             if (panel != null) panel.SetActive(false);
-            
             if (waitingPanel != null) waitingPanel.SetActive(true);
-
-            NetworkManager.Singleton.GetComponent<UnityTransport>().SetHostRelayData(
-                allocation.RelayServer.IpV4,
-                (ushort)allocation.RelayServer.Port,
-                allocation.AllocationIdBytes,
-                allocation.Key,
-                allocation.ConnectionData
-            );
-
-            NetworkManager.Singleton.StartHost();
-            HideUI();
         }
-        catch (System.Exception e)
+        else
         {
-            Debug.LogError("Host 失败: " + e);
+            Debug.LogError("Host 失败: 无法从 RelayManager 获取 JoinCode");
         }
     }
 
@@ -103,34 +94,25 @@ public class ConnectionUI : MonoBehaviour
         JoinRelayGame(code);
     }
 
-    // --- Join 流程 (新版列表点击) ---
+    // --- Join 流程 ---
     private async void JoinRelayGame(string joinCode)
     {
         if (string.IsNullOrEmpty(joinCode)) return;
 
-        try
+        Debug.Log("正在通过 RelayManager 加入房间: " + joinCode);
+
+        // 调用 RelayManager 加入 (它内部会自动处理 WSS 协议和 StartClient)
+        bool success = await RelayManager.Instance.JoinRelay(joinCode);
+
+        if (success)
         {
-            Debug.Log("正在加入房间: " + joinCode);
-            JoinAllocation joinAllocation = await RelayService.Instance.JoinAllocationAsync(joinCode);
-
-            NetworkManager.Singleton.GetComponent<UnityTransport>().SetClientRelayData(
-                joinAllocation.RelayServer.IpV4,
-                (ushort)joinAllocation.RelayServer.Port,
-                joinAllocation.AllocationIdBytes,
-                joinAllocation.Key,
-                joinAllocation.ConnectionData,
-                joinAllocation.HostConnectionData
-            );
-
-            NetworkManager.Singleton.StartClient();
             HideUI();
         }
-        catch (System.Exception e)
+        else
         {
-            Debug.LogError("加入失败: " + e);
+            Debug.LogError("加入失败，请检查验证码或网络");
         }
     }
-
     // --- 房间列表逻辑 ---
     public void RefreshRoomList()
     {
