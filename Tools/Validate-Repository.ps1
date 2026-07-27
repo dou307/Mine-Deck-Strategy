@@ -27,9 +27,9 @@ $cardFiles = @(Get-ChildItem -LiteralPath (Join-Path $repositoryRoot 'Assets/Gam
 $skillTypes = [System.Collections.Generic.HashSet[int]]::new()
 foreach ($cardFile in $cardFiles) {
     $content = Get-Content -Raw -LiteralPath $cardFile.FullName
-    $skillMatch = [regex]::Match($content, '(?m)^  skillType: (-?\d+)$')
-    $costMatch = [regex]::Match($content, '(?m)^  energyCost: (-?\d+)$')
-    $cooldownMatch = [regex]::Match($content, '(?m)^  cooldownTurns: (-?\d+)$')
+    $skillMatch = [regex]::Match($content, '(?m)^  skillType: (-?\d+)\r?$')
+    $costMatch = [regex]::Match($content, '(?m)^  energyCost: (-?\d+)\r?$')
+    $cooldownMatch = [regex]::Match($content, '(?m)^  cooldownTurns: (-?\d+)\r?$')
 
     if (-not ($skillMatch.Success -and $costMatch.Success -and $cooldownMatch.Success)) {
         Add-ValidationError "$($cardFile.Name) 缺少技能、费用或冷却字段。"
