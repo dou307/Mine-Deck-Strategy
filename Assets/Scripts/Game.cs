@@ -1489,4 +1489,21 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
         else trapCountP2++;
     }
 
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+    public void E2ERequestReveal(int x, int y)
+    {
+        RequestActionServerRpc(x, y, "REVEAL");
+    }
+
+    public void E2ERequestSkill(SkillType skillType, int x, int y)
+    {
+        RequestSkillServerRpc(skillType, x, y);
+    }
+
+    public int E2EGetEnergy(Cell.Owner player)
+    {
+        return player == Cell.Owner.PlayerA ? energyP1.Value : energyP2.Value;
+    }
+#endif
+
 }

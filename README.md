@@ -2,7 +2,7 @@
 
 一款把双人竞技、扫雷和技能卡组组合在一起的 Unity 策略游戏。两名玩家通过 Unity Relay 联机，在同一张棋盘上争夺区域、积累能量，并使用防御塔、陷阱、治疗、侦查和干扰类卡牌建立通路、击败对手。
 
-> 当前状态：可编译、可联机游玩的功能型 Alpha。核心战斗与 9 张技能卡已经接入，仍需继续进行双机回归、断线体验、数值平衡和正式发布打包。
+> 当前状态：可编译、可联机游玩的功能型 Alpha。核心战斗与 9 张技能卡已经接入，并已通过 Windows 双进程联机与异常断线回归；仍需继续进行公网 Relay 双设备回归、数值平衡和正式发布打包。
 
 ## 项目亮点
 
@@ -64,6 +64,19 @@ $Unity = '你的 Unity.exe 绝对路径'
 
 也可以在编辑器中使用 `Tools > Mine-Deck > Validate Project`。GitHub Actions 会在每次 push 和 pull request 时自动执行仓库静态检查。
 
+Development Build 还提供双实例端到端回归入口。先构建测试客户端：
+
+```powershell
+$Unity = '你的 Unity.exe 绝对路径'
+$env:MINE_DECK_E2E_BUILD_PATH = (Join-Path (Get-Location) 'Builds\E2E\MineDeckStrategyE2E.exe')
+& $Unity -batchmode -nographics -quit `
+  -projectPath (Get-Location).Path `
+  -executeMethod MineDeckBuildAutomation.BuildWindowsDevelopment `
+  -logFile '.\Logs\e2e-build.log'
+```
+
+然后用两个独立进程分别传入 `--mine-deck-e2e-host <共享目录>` 和 `--mine-deck-e2e-client <共享目录>`。默认走真实 Relay；追加 `--mine-deck-e2e-local` 可改用本机 `127.0.0.1:7777`，用于在没有 Relay 服务时验证连接、准备、开局、回合交替、揭示、能量同步和卡牌扣费。测试结果会写入共享目录中的 `host.done`、`client.done` 或对应的 `.failed` 文件。
+
 ## 目录结构
 
 ```text
@@ -87,4 +100,4 @@ Supabase anon key 是面向客户端的公开密钥，不应把 `service_role` k
 - 当前是 Host 权威的双人房间，不是专用服务器架构。
 - P2 掉线会终止当前对局并回到等待状态，暂不支持恢复原对局。
 - Supabase 房间记录还需要过期清理和更严格的服务端所有权校验。
-- 自动化目前覆盖资产、场景引用、编译和仓库完整性；完整玩法仍需双实例手工回归。
+- 本机双实例回归不能替代两个物理设备、不同网络环境下的 Relay 延迟、丢包和重连测试。
