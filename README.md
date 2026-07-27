@@ -64,6 +64,8 @@ $Unity = '你的 Unity.exe 绝对路径'
 
 也可以在编辑器中使用 `Tools > Mine-Deck > Validate Project`。GitHub Actions 会在每次 push 和 pull request 时自动执行仓库静态检查。
 
+项目纹理可以通过编辑器菜单 `Tools > Mine-Deck > Optimize Textures`，或在批处理模式下调用 `MineDeckTextureOptimizer.OptimizeBatch` 统一优化。当前规则会保留 2048 上限的全屏背景，把技能图标、职业图标和棋盘/UI 精灵分别限制到适合其显示尺寸的分辨率，并为 Standalone 与 WebGL 启用压缩。一次 Windows Development Build 实测从 222.22 MB 降至 156.08 MB，纹理构建占用从 102.7 MB 降至 36.7 MB。
+
 Development Build 还提供双实例端到端回归入口。先构建测试客户端：
 
 ```powershell

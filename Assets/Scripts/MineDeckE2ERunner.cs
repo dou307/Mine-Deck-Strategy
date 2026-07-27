@@ -48,6 +48,7 @@ public sealed class MineDeckE2ERunner : MonoBehaviour
             else
                 await StartClientAsync();
 
+            HideConnectionPanel();
             Game game = await WaitForGameAsync();
             await WaitForPeerAsync();
             Log($"CONNECTED local={NetworkManager.Singleton.LocalClientId}");
@@ -132,6 +133,13 @@ public sealed class MineDeckE2ERunner : MonoBehaviour
                    NetworkManager.Singleton.IsConnectedClient;
         }, "spawned Game");
         return game;
+    }
+
+    private static void HideConnectionPanel()
+    {
+        ConnectionUI connectionUI = FindObjectOfType<ConnectionUI>(true);
+        if (connectionUI != null && connectionUI.panel != null)
+            connectionUI.panel.SetActive(false);
     }
 
     private async Task WaitForPeerAsync()
