@@ -50,6 +50,8 @@ public class PrepManager : MonoBehaviour
     public void EnterPrepPhase()
     {
         Debug.Log("【PrepManager】进入备战阶段！");
+        isReady = false;
+        mySelection.Clear();
         if (waitingPanelRoot) waitingPanelRoot.SetActive(true); // 确保大底板开着
         if (lobbyState) lobbyState.SetActive(false);            // 关掉房间号
         if (prepState) prepState.SetActive(true);               // 打开选卡界面
@@ -58,6 +60,16 @@ public class PrepManager : MonoBehaviour
         RefreshPoolUI();
         RefreshSelectedUI();
         UpdateButtonVisual(); // 刷新一下按钮状态
+    }
+
+    public void ReturnToLobbyPhase()
+    {
+        isReady = false;
+        mySelection.Clear();
+        if (waitingPanelRoot) waitingPanelRoot.SetActive(true);
+        if (lobbyState) lobbyState.SetActive(true);
+        if (prepState) prepState.SetActive(false);
+        UpdateButtonVisual(false);
     }
 
     // --- 阶段 2: 战斗开始 (Prep -> Game) ---

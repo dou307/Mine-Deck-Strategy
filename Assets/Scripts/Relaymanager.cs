@@ -12,6 +12,7 @@ public class RelayManager : MonoBehaviour
 {
     // 单例模式，方便调用
     public static RelayManager Instance { get; private set; }
+    private Task initializationTask;
 
     private void Awake()
     {
@@ -21,14 +22,29 @@ public class RelayManager : MonoBehaviour
 
     private async void Start()
     {
-        // 1. 初始化 Unity Services
-        await UnityServices.InitializeAsync();
-
-        // 2. 匿名登录 (Relay 必须先登录)
-        if (!AuthenticationService.Instance.IsSignedIn)
+        try
         {
-            await AuthenticationService.Instance.SignInAnonymouslyAsync();
+            await EnsureServicesReadyAsync();
         }
+        catch (System.Exception exception)
+        {
+            Debug.LogError($"Unity Services 初始化失败: {exception}");
+        }
+    }
+
+    public Task EnsureServicesReadyAsync()
+    {
+        if (initializationTask == null) initializationTask = InitializeServicesAsync();
+        return initializationTask;
+    }
+
+    private async Task InitializeServicesAsync()
+    {
+        if (UnityServices.State == ServicesInitializationState.Uninitialized)
+            await UnityServices.InitializeAsync();
+
+        if (!AuthenticationService.Instance.IsSignedIn)
+            await AuthenticationService.Instance.SignInAnonymouslyAsync();
     }
 
     /// <summary>
@@ -39,8 +55,10 @@ public class RelayManager : MonoBehaviour
     {
         try
         {
-            // 创建分配：最大 4 人 (3 个客户端 + 1 个主机)
-            Allocation allocation = await RelayService.Instance.CreateAllocationAsync(3);
+            await EnsureServicesReadyAsync();
+
+            // 双人对局：只允许 1 名客户端加入主机
+            Allocation allocation = await RelayService.Instance.CreateAllocationAsync(1);
 
             // 获取 Join Code
             string joinCode = await RelayService.Instance.GetJoinCodeAsync(allocation.AllocationId);
@@ -57,7 +75,11 @@ public class RelayManager : MonoBehaviour
             NetworkManager.Singleton.GetComponent<UnityTransport>().SetRelayServerData(relayServerData);
 
             // 启动 Host (服务器+客户端)
-            NetworkManager.Singleton.StartHost();
+            if (!NetworkManager.Singleton.StartHost())
+            {
+                Debug.LogError("Netcode Host 启动失败。");
+                return null;
+            }
 
             return joinCode;
         }
@@ -74,8 +96,12 @@ public class RelayManager : MonoBehaviour
     /// <param name="joinCode">主机发来的代码</param>
     public async Task<bool> JoinRelay(string joinCode)
     {
+        if (string.IsNullOrWhiteSpace(joinCode)) return false;
+
         try
         {
+            await EnsureServicesReadyAsync();
+            joinCode = joinCode.Trim().ToUpperInvariant();
             JoinAllocation joinAllocation = await RelayService.Instance.JoinAllocationAsync(joinCode);
 
             // 同样根据平台选择连接类型

@@ -70,6 +70,7 @@ public class Game : NetworkBehaviour
     private bool p1Ready = false;
     private bool p2Ready = false;
     private bool matchStarted = false;
+    private ulong? playerBClientId;
     private readonly Dictionary<Cell.Owner, HashSet<SkillType>> playerLoadouts = new Dictionary<Cell.Owner, HashSet<SkillType>>();
     private readonly Dictionary<Cell.Owner, Dictionary<SkillType, int>> playerCooldowns = new Dictionary<Cell.Owner, Dictionary<SkillType, int>>();
 
@@ -145,6 +146,7 @@ public class Game : NetworkBehaviour
         {
             NewGame();
             NetworkManager.Singleton.OnClientConnectedCallback += OnClientConnected;
+            NetworkManager.Singleton.OnClientDisconnectCallback += OnClientDisconnected;
         }
         else
         {
@@ -197,8 +199,19 @@ public class Game : NetworkBehaviour
 
     private void OnClientConnected(ulong clientId)
     {
-        // 如果连接数达到 2 (Host + Client)
-        if (NetworkManager.Singleton.ConnectedClientsIds.Count >= 2)
+        if (clientId == NetworkManager.ServerClientId) return;
+
+        if (playerBClientId.HasValue && playerBClientId.Value != clientId)
+        {
+            Debug.LogWarning($"拒绝额外玩家连接：{clientId}");
+            NetworkManager.DisconnectClient(clientId);
+            return;
+        }
+
+        playerBClientId = clientId;
+
+        // Host + 唯一一名 Client 到齐
+        if (NetworkManager.Singleton.ConnectedClientsIds.Count == 2)
         {
             Debug.Log("玩家凑齐，广播进入备战！");
             EnterPrepClientRpc();
@@ -228,12 +241,22 @@ public class Game : NetworkBehaviour
         }
     }
 
+    [ClientRpc]
+    private void OpponentDisconnectedClientRpc()
+    {
+        gameover = false;
+        if (gameHUD != null) gameHUD.SetActive(false);
+        if (gridParent != null) gridParent.SetActive(false);
+        if (waitingPanel != null) waitingPanel.SetActive(true);
+        if (prepManager != null) prepManager.ReturnToLobbyPhase();
+    }
+
     // 3. 玩家点击准备，同时把本局卡组交给服务器备案
     [ServerRpc(RequireOwnership = false)]
     public void PlayerReadyServerRpc(int[] selectedSkillIds, ServerRpcParams rpc = default)
     {
         ulong id = rpc.Receive.SenderClientId;
-        Cell.Owner player = (id == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+        if (!TryResolveNetworkPlayer(id, out Cell.Owner player)) return;
 
         if (matchStarted || (player == Cell.Owner.PlayerA ? p1Ready : p2Ready))
         {
@@ -263,12 +286,29 @@ public class Game : NetworkBehaviour
         }
     }
 
+    private void OnClientDisconnected(ulong clientId)
+    {
+        if (!playerBClientId.HasValue || playerBClientId.Value != clientId) return;
+
+        Debug.LogWarning("玩家 2 已断开，本局已停止并返回等待状态。");
+        playerBClientId = null;
+        NewGame();
+        OpponentDisconnectedClientRpc();
+
+        if (!string.IsNullOrEmpty(currentJoinCode))
+        {
+            LobbyManager lobby = FindObjectOfType<LobbyManager>();
+            if (lobby != null) lobby.UpdateRoomStatus(currentJoinCode, "WAITING", 1);
+        }
+    }
+
     // 【新增】记得在销毁时取消监听，防止报错
     public override void OnNetworkDespawn()
     {
         if (IsServer)
         {
             NetworkManager.Singleton.OnClientConnectedCallback -= OnClientConnected;
+            NetworkManager.Singleton.OnClientDisconnectCallback -= OnClientDisconnected;
         }
         base.OnNetworkDespawn();
     }
@@ -488,10 +528,8 @@ public class Game : NetworkBehaviour
     {
         // 获取发送者的 ID
         ulong senderId = rpc.Receive.SenderClientId;
-        
-        // 核心逻辑：判定发送者是 A 还是 B
-        // 只要是 ID 0 发来的就是 P1，否则就是 P2
-        Cell.Owner sender = (senderId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+
+        if (!matchStarted || !TryResolveNetworkPlayer(senderId, out Cell.Owner sender)) return;
 
         // 校验：如果不是当前回合的玩家在操作，直接拦截
         if (sender != currentTurn.Value) 
@@ -500,7 +538,7 @@ public class Game : NetworkBehaviour
             return;
         }
 
-        Cell cell = grid[x, y];
+        if (!grid.TryGetCell(x, y, out Cell cell)) return;
 
         // 2. 【新增】如果是废墟，禁止操作
         if (cell.isBedrock) return; 
@@ -525,8 +563,7 @@ public class Game : NetworkBehaviour
     {
         // 1. 确定操作者身份
         ulong clientId = rpcParams.Receive.SenderClientId;
-        // Host 判定为 PlayerA，其他 Client 判定为 PlayerB
-        Cell.Owner sender = (clientId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+        if (!matchStarted || !TryResolveNetworkPlayer(clientId, out Cell.Owner sender)) return;
 
         if (grid.TryGetCell(x, y, out Cell cell))
         {
@@ -584,7 +621,7 @@ public class Game : NetworkBehaviour
     {
         // 1. 身份验证
         ulong clientId = rpcParams.Receive.SenderClientId;
-        Cell.Owner sender = (clientId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+        if (!TryResolveNetworkPlayer(clientId, out Cell.Owner sender)) return;
 
         // 2. 服务端规则检查：比赛状态、回合、卡组、冷却、费用都不能相信客户端
         if (!matchStarted || sender != currentTurn.Value) return;
@@ -1413,8 +1450,26 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
         // 获取本地玩家的唯一 ID
         ulong myId = NetworkManager.Singleton.LocalClientId;
         
-        // 约定：ID 为 0 的（Host）是 PlayerA，其他（Client）是 PlayerB
-        return (myId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+        return (myId == NetworkManager.ServerClientId) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+    }
+
+    private bool TryResolveNetworkPlayer(ulong clientId, out Cell.Owner player)
+    {
+        if (clientId == NetworkManager.ServerClientId)
+        {
+            player = Cell.Owner.PlayerA;
+            return true;
+        }
+
+        if (playerBClientId.HasValue && clientId == playerBClientId.Value)
+        {
+            player = Cell.Owner.PlayerB;
+            return true;
+        }
+
+        player = Cell.Owner.None;
+        Debug.LogWarning($"忽略未登记客户端 {clientId} 的游戏请求。");
+        return false;
     }
 
     // 检查能量是否足够

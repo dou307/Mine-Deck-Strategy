@@ -41,11 +41,7 @@ public class ConnectionUI : MonoBehaviour
     {
         try
         {
-            await UnityServices.InitializeAsync();
-            if (!AuthenticationService.Instance.IsSignedIn)
-            {
-                await AuthenticationService.Instance.SignInAnonymouslyAsync();
-            }
+            await RelayManager.Instance.EnsureServicesReadyAsync();
             Debug.Log("Unity Services 初始化完成, ID: " + AuthenticationService.Instance.PlayerId);
             
             // 初始化完成后，自动刷新一次列表
@@ -73,18 +69,7 @@ public class ConnectionUI : MonoBehaviour
             Game gameLogic = FindObjectOfType<Game>();
             if (gameLogic != null)
             {
-                // 1. 先在场景里找到挂载了 Game 脚本的那个物体
-            Game gameInstance = FindObjectOfType<Game>();
-
-            // 2. 如果找到了，再赋值
-            if (gameInstance != null)
-            {
-                gameInstance.currentJoinCode = code;
-            }
-            else
-            {
-                Debug.LogError("报错了：场景里找不到 Game 组件！请检查 Game.cs 是否挂在某个物体上。");
-            }
+                gameLogic.currentJoinCode = code;
                 Debug.Log($"已将 JoinCode {code} 传递给 Game 逻辑层");
             }
             else
@@ -117,7 +102,7 @@ public class ConnectionUI : MonoBehaviour
     }
 
     // --- Join 流程 (旧版手动输入) ---
-    public async void OnJoinClicked()
+    public void OnJoinClicked()
     {
         string code = joinInput.text;
         JoinRelayGame(code);
