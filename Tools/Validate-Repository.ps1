@@ -74,3 +74,4 @@ if ($errors.Count -gt 0) {
 }
 
 Write-Host "Repository validation passed: $($cardFiles.Count) cards, $($skillTypes.Count) unique skills."
+exit 0
