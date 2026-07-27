@@ -10,6 +10,8 @@ public class RoomData
 {
     public string join_code;
     public string room_name;
+    public string status;      // 新增：WAITING 或 FULL
+    public int player_count;   // 新增：当前人数
 }
 
 public class LobbyManager : MonoBehaviour
@@ -31,7 +33,7 @@ public class LobbyManager : MonoBehaviour
     private IEnumerator PostRoomCoroutine(string joinCode, string roomName)
     {
         // 构造 JSON 数据
-        string json = $"{{\"join_code\": \"{joinCode}\", \"room_name\": \"{roomName}\"}}";
+        string json = $"{{\"join_code\": \"{joinCode}\", \"room_name\": \"{roomName}\", \"status\": \"WAITING\", \"player_count\": 1}}";
         
         string url = $"{supabaseUrl}/rest/v1/rooms";
 
@@ -70,8 +72,7 @@ public class LobbyManager : MonoBehaviour
     private IEnumerator FetchRoomsCoroutine()
     {
         // 按照创建时间倒序排列，最新的在前面
-        string url = $"{supabaseUrl}/rest/v1/rooms?select=join_code,room_name&order=created_at.desc";
-
+        string url = $"{supabaseUrl}/rest/v1/rooms?select=join_code,room_name,status,player_count&order=created_at.desc";
         using (UnityWebRequest request = UnityWebRequest.Get(url))
         {
             request.SetRequestHeader("apikey", supabaseKey);
@@ -134,6 +135,31 @@ public class LobbyManager : MonoBehaviour
             {
                 Debug.LogError($"【Lobby】改名失败: {request.error}\n{request.downloadHandler.text}");
             }
+        }
+    }
+
+    // --- 新增功能: 更新房间状态 (比如有人进来了，或者游戏开始了) ---
+    public void UpdateRoomStatus(string joinCode, string newStatus, int newCount)
+    {
+        StartCoroutine(UpdateRoomStatusCoroutine(joinCode, newStatus, newCount));
+    }
+
+    private IEnumerator UpdateRoomStatusCoroutine(string joinCode, string newStatus, int newCount)
+    {
+        // 构造 JSON 更新状态
+        string json = $"{{\"status\": \"{newStatus}\", \"player_count\": {newCount}}}";
+        string url = $"{supabaseUrl}/rest/v1/rooms?join_code=eq.{joinCode}";
+
+        using (UnityWebRequest request = new UnityWebRequest(url, "PATCH"))
+        {
+            byte[] bodyRaw = Encoding.UTF8.GetBytes(json);
+            request.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/json");
+            request.SetRequestHeader("apikey", supabaseKey);
+            request.SetRequestHeader("Authorization", "Bearer " + supabaseKey);
+
+            yield return request.SendWebRequest();
         }
     }
 
