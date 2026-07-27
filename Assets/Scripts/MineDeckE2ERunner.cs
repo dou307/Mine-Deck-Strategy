@@ -2,6 +2,7 @@
 using System;
 using System.IO;
 using System.Threading.Tasks;
+using TMPro;
 using Unity.Netcode;
 using Unity.Netcode.Transports.UTP;
 using UnityEngine;
@@ -49,6 +50,7 @@ public sealed class MineDeckE2ERunner : MonoBehaviour
                 await StartClientAsync();
 
             HideConnectionPanel();
+            ValidateDynamicFont();
             Game game = await WaitForGameAsync();
             await WaitForPeerAsync();
             Log($"CONNECTED local={NetworkManager.Singleton.LocalClientId}");
@@ -140,6 +142,19 @@ public sealed class MineDeckE2ERunner : MonoBehaviour
         ConnectionUI connectionUI = FindObjectOfType<ConnectionUI>(true);
         if (connectionUI != null && connectionUI.panel != null)
             connectionUI.panel.SetActive(false);
+    }
+
+    private static void ValidateDynamicFont()
+    {
+        TMP_FontAsset fontAsset = TMP_Settings.defaultFontAsset;
+        if (fontAsset == null)
+            throw new InvalidOperationException("TMP default font asset is missing.");
+
+        const int DynamicProbeCodePoint = 0x66F9;
+        char dynamicProbe = (char)DynamicProbeCodePoint;
+        if (!fontAsset.HasCharacter(dynamicProbe, false, true))
+            throw new InvalidOperationException(
+                $"Dynamic Chinese glyph loading failed: U+{DynamicProbeCodePoint:X4}");
     }
 
     private async Task WaitForPeerAsync()

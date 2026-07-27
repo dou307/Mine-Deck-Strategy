@@ -66,6 +66,8 @@ $Unity = '你的 Unity.exe 绝对路径'
 
 项目纹理可以通过编辑器菜单 `Tools > Mine-Deck > Optimize Textures`，或在批处理模式下调用 `MineDeckTextureOptimizer.OptimizeBatch` 统一优化。当前规则会保留 2048 上限的全屏背景，把技能图标、职业图标和棋盘/UI 精灵分别限制到适合其显示尺寸的分辨率，并为 Standalone 与 WebGL 启用压缩。一次 Windows Development Build 实测从 222.22 MB 降至 156.08 MB，纹理构建占用从 102.7 MB 降至 36.7 MB。
 
+UI 字体可以通过 `Tools > Mine-Deck > Optimize UI Font`，或批处理方法 `MineDeckFontOptimizer.OptimizeBatch` 重新收集当前场景、卡牌和运行时代码所需字符。生成的 `MineDeck UI SDF` 使用单张 2048 图集预热当前文案，同时保留动态中文扩展能力。字体优化后同一 Windows Development Build 从 156.08 MB 进一步降至 130.58 MB。
+
 Development Build 还提供双实例端到端回归入口。先构建测试客户端：
 
 ```powershell
