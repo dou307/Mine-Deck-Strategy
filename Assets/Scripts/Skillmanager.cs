@@ -35,11 +35,9 @@ public class SkillManager : NetworkBehaviour
             case SkillType.RadarScan: 
                 return LogicRadarScan(player, x, y);
             case SkillType.HealSmall:
-                // 参数：玩家, 治疗量(25), 能量消耗(20) -> 数值你可以自己调
-                return LogicHeal(player, 25, 20); 
+                return LogicHeal(player, 25);
             case SkillType.HealLarge:
-                // 参数：玩家, 治疗量(60), 能量消耗(50)
-                return LogicHeal(player, 60, 50);
+                return LogicHeal(player, 60);
             case SkillType.Ghost:
                 return LogicGhost(player, x, y);
             case SkillType.DataRollback:
@@ -81,13 +79,6 @@ public class SkillManager : NetworkBehaviour
             return false;
         }
 
-        // --- 3. 能量消耗检查 ---
-        int energyCost = 20; // 建议统一用变量控制
-        if (!game.HasEnoughEnergy(player, energyCost)) return false;
-
-        // --- 4. 执行逻辑 ---
-        game.ModifyEnergy(player, -energyCost);
-        
         cell.hasTrap = true;
         cell.trapOwner = player; // 【关键】这里赋值后，Board.cs 就会自动判断画红色还是蓝色 Tile
         
@@ -166,9 +157,6 @@ public class SkillManager : NetworkBehaviour
     //雷达扫描（无伤占领地雷）
     private bool LogicRadarScan(Cell.Owner player, int x, int y)
     {
-        // 1. 能量检查 (假设这种强力排雷需要 30 能量)
-        if (!game.HasEnoughEnergy(player, 30)) return false;
-
         bool foundAnyMine = false;
 
         // 2. 遍历 3x3 区域
@@ -194,9 +182,6 @@ public class SkillManager : NetworkBehaviour
             }
         }
 
-        // 无论是否扫到雷，只要技能发动了就扣除能量
-        game.ModifyEnergy(player, -30);
-        
         // 如果扫到了雷，给个反馈
         if (foundAnyMine) {
             Debug.Log($"{player} 使用雷达精准捕获了地雷！");
@@ -206,12 +191,9 @@ public class SkillManager : NetworkBehaviour
     }
 
     // --- 通用治疗逻辑 ---
-    private bool LogicHeal(Cell.Owner player, int healAmount, int energyCost)
+    private bool LogicHeal(Cell.Owner player, int healAmount)
     {
-        // 1. 能量检查
-        if (!game.HasEnoughEnergy(player, energyCost)) return false;
-
-        // 2. 满血检查 (可选：如果是满血，不让用，避免浪费)
+        // 满血时不消耗卡牌
         int currentHP = (player == Cell.Owner.PlayerA) ? game.hpP1.Value : game.hpP2.Value;
         if (currentHP >= game.maxHealth) 
         {
@@ -219,10 +201,7 @@ public class SkillManager : NetworkBehaviour
             return false;
         }
 
-        // 3. 扣除能量
-        game.ModifyEnergy(player, -energyCost);
-
-        // 4. 恢复生命 
+        // 恢复生命
         // 技巧：Game.cs 里的 ModifyHP 接收的是"伤害"，传入负数就是"治疗"
         // 比如传入 -25，也就是 hp - (-25) = hp + 25
         game.ModifyHP(player, -healAmount); 
@@ -232,13 +211,7 @@ public class SkillManager : NetworkBehaviour
     }
     private bool LogicGhost(Cell.Owner player, int x, int y)
     {
-        int cost = 70;
-        if (!game.HasEnoughEnergy(player, cost)) return false;
-
-        // 2. 扣能量
-        game.ModifyEnergy(player, -cost);
-
-        // 3. 【核心】设置无敌回合
+        // 设置无敌回合
         // 设为 2：代表 "我的当前回合剩余时间" + "敌人的一整个回合"。
         // 当我下一次行动开始时，无敌结束。
         // 如果想要 "敌人打我两轮我都无敌"，可以设为 3 或 4。
@@ -254,10 +227,6 @@ public class SkillManager : NetworkBehaviour
     //数据回滚
     private bool LogicDataRollback(Cell.Owner player, int x, int y)
     {
-        // 1. 能量检查 (这是一个强力控制技能，建议 45-50 费)
-        int cost = 70;
-        if (!game.HasEnoughEnergy(player, cost)) return false;
-
         bool hasEffect = false; // 记录是否至少重置了一个格子
 
         // 2. 遍历 3x3 区域
@@ -300,7 +269,6 @@ public class SkillManager : NetworkBehaviour
         // 3. 结算
         if (hasEffect)
         {
-            game.ModifyEnergy(player, -cost);
             Debug.Log($"{player} 在 ({x},{y}) 执行了数据回滚，区域已重置！");
             return true;
         }
@@ -332,13 +300,7 @@ public class SkillManager : NetworkBehaviour
             return false; // 直接返回，不扣费
         }
 
-        // 3. 能量消耗 (40费，这是一个关键的战术技能)
-        int cost = 40;
-        if (!game.HasEnoughEnergy(player, cost)) return false;
-
-        game.ModifyEnergy(player, -cost);
-
-        // 4. 施加阻断状态 (持续 3 回合)
+        // 施加阻断状态 (持续 3 回合)
         game.RegisterJam(x, y, 3);
         Debug.Log($"{player} 阻断了 ({x},{y}) 的信号连接！");
         return true;

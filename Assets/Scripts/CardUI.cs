@@ -182,9 +182,9 @@ public class CardUI : MonoBehaviour
     }
 
     // 开始冷却 (技能释放成功后调用)
-    public void StartCooldown()
+    public void StartCooldown(int turns)
     {
-        currentCD = data.cooldownTurns;
+        currentCD = Mathf.Max(0, turns);
         SetSelected(false); // 取消高亮
         // RefreshState 会在 Game.cs 的能量扣除后统一刷新，或者手动刷新
     }

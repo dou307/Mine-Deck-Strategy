@@ -69,6 +69,9 @@ public class Game : NetworkBehaviour
     public PrepManager prepManager; // 【记得拖拽引用】
     private bool p1Ready = false;
     private bool p2Ready = false;
+    private bool matchStarted = false;
+    private readonly Dictionary<Cell.Owner, HashSet<SkillType>> playerLoadouts = new Dictionary<Cell.Owner, HashSet<SkillType>>();
+    private readonly Dictionary<Cell.Owner, Dictionary<SkillType, int>> playerCooldowns = new Dictionary<Cell.Owner, Dictionary<SkillType, int>>();
 
     [Header("UI 引用 - 玩家A (P1)")]
     public UnityEngine.UI.Slider hpSliderA;
@@ -225,14 +228,29 @@ public class Game : NetworkBehaviour
         }
     }
 
-    // 3. 新增 RPC: 玩家点击准备
+    // 3. 玩家点击准备，同时把本局卡组交给服务器备案
     [ServerRpc(RequireOwnership = false)]
-    public void PlayerReadyServerRpc(ServerRpcParams rpc = default)
+    public void PlayerReadyServerRpc(int[] selectedSkillIds, ServerRpcParams rpc = default)
     {
         ulong id = rpc.Receive.SenderClientId;
-        
-        // 简单判定：Host是P1，Client是P2
-        if (id == 0) p1Ready = true;
+        Cell.Owner player = (id == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+
+        if (matchStarted || (player == Cell.Owner.PlayerA ? p1Ready : p2Ready))
+        {
+            Debug.LogWarning($"玩家 {id} 重复提交准备请求，已忽略。");
+            return;
+        }
+
+        if (!TryValidateLoadout(selectedSkillIds, out HashSet<SkillType> loadout))
+        {
+            Debug.LogWarning($"玩家 {id} 提交了无效卡组，已拒绝准备。");
+            return;
+        }
+
+        playerLoadouts[player] = loadout;
+        playerCooldowns[player] = new Dictionary<SkillType, int>();
+
+        if (player == Cell.Owner.PlayerA) p1Ready = true;
         else p2Ready = true;
 
         Debug.Log($"玩家 {id} 已准备。P1:{p1Ready}, P2:{p2Ready}");
@@ -240,6 +258,7 @@ public class Game : NetworkBehaviour
         // 两个人都准备好了，才真正开始游戏
         if (p1Ready && p2Ready)
         {
+            matchStarted = true;
             StartMatchClientRpc();
         }
     }
@@ -293,6 +312,9 @@ public class Game : NetworkBehaviour
         // 3. 重置备战状态 (非常重要！否则会直接跳过选卡)
         p1Ready = false; 
         p2Ready = false;
+        matchStarted = false;
+        playerLoadouts.Clear();
+        playerCooldowns.Clear();
 
         // 4. 重置 NetworkVariables (数值)
         energyP1.Value = 0;
@@ -386,10 +408,6 @@ public class Game : NetworkBehaviour
         {
             // 插旗不消耗回合，所以它不走 EndTurn 流程，独立使用 RequestFlagServerRpc
             RequestFlagServerRpc(pos.x, pos.y);
-        }
-        else if (Input.GetMouseButtonDown(2))
-        {
-            RequestSkillServerRpc(SkillType.Unchord, pos.x, pos.y);
         }
         if (Input.GetMouseButton(2))
         {
@@ -568,23 +586,37 @@ public class Game : NetworkBehaviour
         ulong clientId = rpcParams.Receive.SenderClientId;
         Cell.Owner sender = (clientId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
 
-        // 2. 回合检查
-        if (sender != currentTurn.Value) return;
+        // 2. 服务端规则检查：比赛状态、回合、卡组、冷却、费用都不能相信客户端
+        if (!matchStarted || sender != currentTurn.Value) return;
+        if (!TryGetCardData(skillType, out CardData cardData)) return;
+        if (!playerLoadouts.TryGetValue(sender, out HashSet<SkillType> loadout) || !loadout.Contains(skillType))
+        {
+            Debug.LogWarning($"玩家 {sender} 尝试使用未携带的技能 {skillType}。");
+            return;
+        }
+        if (GetServerCooldown(sender, skillType) > 0)
+        {
+            Debug.LogWarning($"玩家 {sender} 尝试使用冷却中的技能 {skillType}。");
+            return;
+        }
+        if (cardData.needTarget && !grid.InBounds(x, y)) return;
+        if (!HasEnoughEnergy(sender, cardData.energyCost)) return;
 
         // 3. 调用 SkillManager 执行逻辑
-        // 注意：ExecuteSkill 内部已经包含了能量检查、数量限制等判定
         bool success = skillManager.ExecuteSkill(skillType, sender, x, y);
 
-        // 4. 如果技能释放成功，消耗回合
+        // 4. 效果成功后，由服务器统一扣费并登记冷却
         if (success)
         {
-            ConfirmSkillCastClientRpc(sender);
+            ModifyEnergy(sender, -cardData.energyCost);
+            SetServerCooldown(sender, skillType, cardData.cooldownTurns);
+            ConfirmSkillCastClientRpc(sender, skillType, cardData.cooldownTurns);
             EndTurn();
         }
     }
 
     [ClientRpc]
-    private void ConfirmSkillCastClientRpc(Cell.Owner owner)
+    private void ConfirmSkillCastClientRpc(Cell.Owner owner, SkillType skillType, int cooldownTurns)
     {
         // 只有释放技能的那个玩家需要更新 UI
         if (GetLocalPlayerIdentity() == owner)
@@ -592,7 +624,7 @@ public class Game : NetworkBehaviour
             if (deckManager != null) 
             {
                 // 1. 告诉 DeckManager 技能放出去了 (进入冷却 CD)
-                deckManager.OnSkillCastSuccess();
+                deckManager.OnSkillCastSuccess(skillType, cooldownTurns);
                 
                 // 2. 顺便刷新一下所有卡的状态 (因为能量刚才肯定变了)
                 deckManager.RefreshAllCardsState();
@@ -852,14 +884,7 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
             return false;
         }
 
-        // 6. 【能量检查】
-        int currentEnergy = (player == Cell.Owner.PlayerA) ? energyP1.Value : energyP2.Value;
-        if (currentEnergy < costBuildTower ) return false;
-
-        // --- 扣除消耗 ---
-        ModifyEnergy(player, -costBuildTower );
-
-        // 7. 【判定结果】
+        // 6. 【判定结果】费用由 RequestSkillServerRpc 按 CardData 统一处理
         bool isMine = (cell.type == Cell.Type.Mine);
         bool canBuildOnExploded = cell.exploded && cell.owner == player;
         bool isHidden = !cell.revealed;
@@ -1260,6 +1285,73 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
             currentTurn.Value = Cell.Owner.PlayerB;
         else
             currentTurn.Value = Cell.Owner.PlayerA;
+
+        ReduceServerCooldowns(currentTurn.Value);
+    }
+
+    private bool TryValidateLoadout(int[] selectedSkillIds, out HashSet<SkillType> loadout)
+    {
+        loadout = new HashSet<SkillType>();
+        if (selectedSkillIds == null || prepManager == null) return false;
+        if (selectedSkillIds.Length < 1 || selectedSkillIds.Length > prepManager.maxCards) return false;
+
+        foreach (int skillId in selectedSkillIds)
+        {
+            SkillType skillType = (SkillType)skillId;
+            if (skillType == SkillType.None || !TryGetCardData(skillType, out _)) return false;
+            if (!loadout.Add(skillType)) return false;
+        }
+
+        return true;
+    }
+
+    private bool TryGetCardData(SkillType skillType, out CardData cardData)
+    {
+        cardData = null;
+        if (prepManager == null || prepManager.allAvailableCards == null) return false;
+
+        foreach (CardData candidate in prepManager.allAvailableCards)
+        {
+            if (candidate != null && candidate.skillType == skillType)
+            {
+                cardData = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private int GetServerCooldown(Cell.Owner player, SkillType skillType)
+    {
+        if (playerCooldowns.TryGetValue(player, out Dictionary<SkillType, int> cooldowns) &&
+            cooldowns.TryGetValue(skillType, out int turns))
+        {
+            return turns;
+        }
+
+        return 0;
+    }
+
+    private void SetServerCooldown(Cell.Owner player, SkillType skillType, int turns)
+    {
+        if (!playerCooldowns.TryGetValue(player, out Dictionary<SkillType, int> cooldowns))
+        {
+            cooldowns = new Dictionary<SkillType, int>();
+            playerCooldowns[player] = cooldowns;
+        }
+
+        cooldowns[skillType] = Mathf.Max(0, turns);
+    }
+
+    private void ReduceServerCooldowns(Cell.Owner player)
+    {
+        if (!playerCooldowns.TryGetValue(player, out Dictionary<SkillType, int> cooldowns)) return;
+
+        foreach (SkillType skillType in new List<SkillType>(cooldowns.Keys))
+        {
+            cooldowns[skillType] = Mathf.Max(0, cooldowns[skillType] - 1);
+        }
     }
     private bool CheckPathConnection(Cell.Owner player)
     {

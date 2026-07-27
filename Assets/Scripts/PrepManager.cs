@@ -187,7 +187,8 @@ public class PrepManager : MonoBehaviour
         // 告诉服务器
         if (game != null) 
         {
-            game.PlayerReadyServerRpc();
+            int[] selectedSkillIds = mySelection.ConvertAll(card => (int)card.skillType).ToArray();
+            game.PlayerReadyServerRpc(selectedSkillIds);
         }
         else 
         {

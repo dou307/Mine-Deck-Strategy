@@ -89,11 +89,12 @@ public class DeckManager : MonoBehaviour
 
     // --- 核心事件响应 (保持不变) ---
 
-    public void OnSkillCastSuccess()
+    public void OnSkillCastSuccess(SkillType skillType, int cooldownTurns)
     {
-        if (currentSelectedUI != null)
+        CardUI castCard = spawnedCards.Find(card => card != null && card.data != null && card.data.skillType == skillType);
+        if (castCard != null)
         {
-            currentSelectedUI.StartCooldown(); 
+            castCard.StartCooldown(cooldownTurns);
             DeselectCard();
             RefreshAllCardsState();
         }
