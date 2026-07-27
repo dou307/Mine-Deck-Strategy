@@ -53,4 +53,5 @@ public class Cell
     }
 
     public bool isTowerRevealed = false;
+    public int jamTurns;
 }

@@ -1,4 +1,6 @@
+using System;
 using System.Collections;
+using System.Collections.Generic;
 using UnityEngine;
 using TMPro;
 using Unity.Netcode;
@@ -10,7 +12,6 @@ public class Game : NetworkBehaviour
     public int width = 32;
     public int height = 16;
     public int mineCount = 80;
-    public float defaultCameraSize = 10f; // 摄像机大小
 
     [Header("回合与规则设置")]
     // 记录当前是谁的回合 (对应之前的 netCurrentTurn)
@@ -35,7 +36,7 @@ public class Game : NetworkBehaviour
     public int damageMine = 5;         // 踩雷伤害
     public int damageTrap = 10;        // 【新增】陷阱伤害
     public int damageTowerDirect = 10; // 点塔伤害
-    public int damageTowerAOE = 3;     // 塔AOE伤害
+    public int damageTowerAOE = 5;     // 塔AOE伤害
     public int damageBuildFail = 3;    // 建塔失败反噬
     public int damageRoadConnected = 20; // 通路连通伤害
 
@@ -58,6 +59,20 @@ public class Game : NetworkBehaviour
     // 对应原来的 energyA / energyB
     public NetworkVariable<int> energyP1 = new NetworkVariable<int>(0); 
     public NetworkVariable<int> energyP2 = new NetworkVariable<int>(0);
+    public NetworkVariable<int> immuneTurnsP1 = new NetworkVariable<int>(0);
+    public NetworkVariable<int> immuneTurnsP2 = new NetworkVariable<int>(0);
+    [Header("手感微调")]
+    [Tooltip("点击位置的Y轴修正值。如果点上面偏了就调大，点下面偏了就调小")]
+    public float clickOffsetY = 0.25f; // 默认值先改小一点
+
+    [Header("备战管理")]
+    public PrepManager prepManager; // 【记得拖拽引用】
+    private bool p1Ready = false;
+    private bool p2Ready = false;
+    private bool matchStarted = false;
+    private ulong? playerBClientId;
+    private readonly Dictionary<Cell.Owner, HashSet<SkillType>> playerLoadouts = new Dictionary<Cell.Owner, HashSet<SkillType>>();
+    private readonly Dictionary<Cell.Owner, Dictionary<SkillType, int>> playerCooldowns = new Dictionary<Cell.Owner, Dictionary<SkillType, int>>();
 
     [Header("UI 引用 - 玩家A (P1)")]
     public UnityEngine.UI.Slider hpSliderA;
@@ -82,7 +97,9 @@ public class Game : NetworkBehaviour
     public GameObject waitingPanel; // 【新增】用来在游戏开始时关闭它
 
     public GameObject gameOverPanel; 
+    public DeckManager deckManager;
     public TMPro.TMP_Text winnerText;
+    public string currentJoinCode;
 
     // 内部引用
     private Board board;
@@ -92,6 +109,7 @@ public class Game : NetworkBehaviour
     private bool mapGenerated = false;
     private float lastScreenWidth;
     private float lastScreenHeight;
+    private List<Vector2Int> jammedCells = new List<Vector2Int>();
 
     private void Awake()
     {
@@ -104,16 +122,19 @@ public class Game : NetworkBehaviour
         public int x, y;
         public int type;
         public int number;
+        public int unlockTurn;
+        public int jamTurns;
         public void NetworkSerialize<T>(BufferSerializer<T> serializer) where T : IReaderWriter
         {
             serializer.SerializeValue(ref x);
             serializer.SerializeValue(ref y);
             serializer.SerializeValue(ref type);
             serializer.SerializeValue(ref number);
+            serializer.SerializeValue(ref jamTurns);
+            serializer.SerializeValue(ref unlockTurn);
         }
     }
 
-    // 6. 替代 Start()，这是网络对象的初始化入口
     public override void OnNetworkSpawn()
     {
         skillManager = GetComponent<SkillManager>();
@@ -125,6 +146,7 @@ public class Game : NetworkBehaviour
         {
             NewGame();
             NetworkManager.Singleton.OnClientConnectedCallback += OnClientConnected;
+            NetworkManager.Singleton.OnClientDisconnectCallback += OnClientDisconnected;
         }
         else
         {
@@ -134,13 +156,34 @@ public class Game : NetworkBehaviour
         }
 
         // 7. 绑定变量变化回调 (当数值变化时，自动刷新 UI)
-        currentTurn.OnValueChanged += (oldVal, newVal) => UpdateTurnUI();
+        currentTurn.OnValueChanged += (oldVal, newVal) => 
+        {
+            UpdateTurnUI();
+            
+            // 【新增修复】当回合发生变化，且新回合是自己的时候，刷新 CD
+            // 这个回调在主机和客户端都会触发，所以 P2 也能收到了！
+            if (GetLocalPlayerIdentity() == newVal)
+            {
+                if (deckManager != null) 
+                {
+                    deckManager.OnNewTurnStarted();
+                }
+            }
+            
+            // 原有的重绘逻辑保持在下面...
+            if (grid != null) {
+                board.Draw(grid, GetLocalPlayerIdentity(), totalTurnCount.Value);
+            }
+        };
         
         energyP1.OnValueChanged += (oldVal, newVal) => UpdateEnergyUI(Cell.Owner.PlayerA, newVal);
         energyP2.OnValueChanged += (oldVal, newVal) => UpdateEnergyUI(Cell.Owner.PlayerB, newVal);
         
         hpP1.OnValueChanged += (oldVal, newVal) => UpdateHealthUI(Cell.Owner.PlayerA, newVal);
         hpP2.OnValueChanged += (oldVal, newVal) => UpdateHealthUI(Cell.Owner.PlayerB, newVal);
+        // 在 OnNetworkSpawn 里添加：
+        immuneTurnsP1.OnValueChanged += (old, val) => UpdateHealthUI(Cell.Owner.PlayerA, hpP1.Value);
+        immuneTurnsP2.OnValueChanged += (old, val) => UpdateHealthUI(Cell.Owner.PlayerB, hpP2.Value);
 
         // 强制刷新一次 UI
         UpdateTurnUI();
@@ -151,19 +194,111 @@ public class Game : NetworkBehaviour
             }
         };
 
-        SetupCamera();
+        // SetupCamera();
     }
 
-    // 【新增】服务器监听连接的回调
     private void OnClientConnected(ulong clientId)
     {
-        // 检查当前房间人数
-        // 注意：ConnectedClientsIds 包含了 Host 和所有 Client
-        if (NetworkManager.Singleton.ConnectedClientsIds.Count >= 2)
+        if (clientId == NetworkManager.ServerClientId) return;
+
+        if (playerBClientId.HasValue && playerBClientId.Value != clientId)
         {
-            Debug.Log("玩家已凑齐，开始游戏！");
-            // 广播给所有人：显示游戏界面
+            Debug.LogWarning($"拒绝额外玩家连接：{clientId}");
+            NetworkManager.DisconnectClient(clientId);
+            return;
+        }
+
+        playerBClientId = clientId;
+
+        // Host + 唯一一名 Client 到齐
+        if (NetworkManager.Singleton.ConnectedClientsIds.Count == 2)
+        {
+            Debug.Log("玩家凑齐，广播进入备战！");
+            EnterPrepClientRpc();
+
+            // 【新增】如果是 Host，且存了 JoinCode，去更新 Supabase
+            if (IsServer && !string.IsNullOrEmpty(currentJoinCode))
+            {
+                // 找到 LobbyManager 更新状态为 FULL
+                var lobby = FindObjectOfType<LobbyManager>();
+                if (lobby != null)
+                {
+                    lobby.UpdateRoomStatus(currentJoinCode, "FULL", 2);
+                }
+            }
+        }
+    }
+
+    [ClientRpc]
+    private void EnterPrepClientRpc()
+    {
+        // 如果之前 waitingPanel 被关了（虽然应该没关），确保它开着
+        if (waitingPanel != null) waitingPanel.SetActive(true);
+
+        if (prepManager != null)
+        {
+            prepManager.EnterPrepPhase();
+        }
+    }
+
+    [ClientRpc]
+    private void OpponentDisconnectedClientRpc()
+    {
+        gameover = false;
+        if (gameHUD != null) gameHUD.SetActive(false);
+        if (gridParent != null) gridParent.SetActive(false);
+        if (waitingPanel != null) waitingPanel.SetActive(true);
+        if (prepManager != null) prepManager.ReturnToLobbyPhase();
+    }
+
+    // 3. 玩家点击准备，同时把本局卡组交给服务器备案
+    [ServerRpc(RequireOwnership = false)]
+    public void PlayerReadyServerRpc(int[] selectedSkillIds, ServerRpcParams rpc = default)
+    {
+        ulong id = rpc.Receive.SenderClientId;
+        if (!TryResolveNetworkPlayer(id, out Cell.Owner player)) return;
+
+        if (matchStarted || (player == Cell.Owner.PlayerA ? p1Ready : p2Ready))
+        {
+            Debug.LogWarning($"玩家 {id} 重复提交准备请求，已忽略。");
+            return;
+        }
+
+        if (!TryValidateLoadout(selectedSkillIds, out HashSet<SkillType> loadout))
+        {
+            Debug.LogWarning($"玩家 {id} 提交了无效卡组，已拒绝准备。");
+            return;
+        }
+
+        playerLoadouts[player] = loadout;
+        playerCooldowns[player] = new Dictionary<SkillType, int>();
+
+        if (player == Cell.Owner.PlayerA) p1Ready = true;
+        else p2Ready = true;
+
+        Debug.Log($"玩家 {id} 已准备。P1:{p1Ready}, P2:{p2Ready}");
+
+        // 两个人都准备好了，才真正开始游戏
+        if (p1Ready && p2Ready)
+        {
+            matchStarted = true;
             StartMatchClientRpc();
+        }
+    }
+
+    private void OnClientDisconnected(ulong clientId)
+    {
+        if (!playerBClientId.HasValue || playerBClientId.Value != clientId) return;
+
+        Debug.LogWarning("玩家 2 已断开，本局已停止并返回等待状态。");
+        playerBClientId = null;
+        NewGame();
+        OpponentDisconnectedClientRpc();
+
+        if (!string.IsNullOrEmpty(currentJoinCode))
+        {
+            LobbyManager lobby = FindObjectOfType<LobbyManager>();
+            if (lobby != null) lobby.UpdateRoomStatus(currentJoinCode, "WAITING", 1);
         }
     }
 
@@ -173,38 +308,67 @@ public class Game : NetworkBehaviour
         if (IsServer)
         {
             NetworkManager.Singleton.OnClientConnectedCallback -= OnClientConnected;
+            NetworkManager.Singleton.OnClientDisconnectCallback -= OnClientDisconnected;
         }
         base.OnNetworkDespawn();
     }
 
+    // --- 【新增】供 UI 按钮调用的重开方法 ---
+    public void ServerRematch()
+    {
+        if (!IsServer) return;
+
+        Debug.Log("房主发起重赛，重置游戏数据...");
+
+        // 1. 重置所有数据
+        NewGame();
+
+        // 2. 广播让所有客户端（包括Host自己）重新进入备战界面
+        // 注意：这里不需要重新连接网络，只是切换 UI 状态
+        EnterPrepClientRpc();
+    }
+
+    // --- 【修改】更彻底的重置逻辑 ---
     private void NewGame()
     {
-        if (!IsServer) return; // 只有服务器能重置游戏
+        if (!IsServer) return; 
 
         StopAllCoroutines();
         gameover = false;
+        
+        // 1. 重置回合与地图
         totalTurnCount.Value = 1; 
+        currentTurn.Value = Cell.Owner.PlayerA; // 重置为 P1 先手
+        grid = new CellGrid(width, height);     // 服务器生成新空网格
+        mapGenerated = false;                   // 标记地图未生成（下次点击生成雷）
+        jammedCells.Clear();                    // 清空被阻断的格子记录
 
-        grid = new CellGrid(width, height);
-
-        mapGenerated = false;
-        
-        // 服务器初始化完，通知所有客户端“重画格子”
-        // 这里简化处理：因为刚开始都是空的，所以客户端 new CellGrid 就行了
-        
+        // 2. 重置计数器
         towerCountA = 0;
         towerCountB = 0;
+        trapCountP1 = 0; // 【新增】重置陷阱数
+        trapCountP2 = 0;
 
-        // 修改 NetworkVariable
+        // 3. 重置备战状态 (非常重要！否则会直接跳过选卡)
+        p1Ready = false; 
+        p2Ready = false;
+        matchStarted = false;
+        playerLoadouts.Clear();
+        playerCooldowns.Clear();
+
+        // 4. 重置 NetworkVariables (数值)
         energyP1.Value = 0;
         energyP2.Value = 0;
         hpP1.Value = maxHealth;
         hpP2.Value = maxHealth;
-        currentTurn.Value = Cell.Owner.PlayerA;
-
-        Debug.Log("服务器：新对局已开始");
         
-        // 通知客户端重置画面
+        // 【新增】重置无敌状态
+        immuneTurnsP1.Value = 0;
+        immuneTurnsP2.Value = 0;
+
+        Debug.Log("服务器：数据已重置，等待玩家重新备战...");
+        
+        // 5. 通知客户端重置棋盘画面 (变回全白)
         ResetBoardClientRpc();
     }
 
@@ -213,25 +377,43 @@ public class Game : NetworkBehaviour
         // 如果没有连接网络，不运行
         if (!IsSpawned) return; 
 
+        // 游戏结束时的逻辑
         if (gameover)
         {
-            // 只有服务器能按 R 重开
-            if (IsServer && Input.GetKeyDown(KeyCode.R)) NewGame();
+            // 这里删除了原来的 Input.GetKeyDown(KeyCode.R)
+            // 改为完全由 UI 按钮调用 ServerRematch()，防止误触
             return;
         }
+
+        // 屏幕适配逻辑 (保持不变)
         if (Screen.width != lastScreenWidth || Screen.height != lastScreenHeight)
         {
-            SetupCamera();
+            // SetupCamera(); // 如果你需要动态调整相机
             lastScreenWidth = Screen.width;
             lastScreenHeight = Screen.height;
         }
-       HandleInput(GetLocalPlayerIdentity());
+
+        // 处理输入
+        HandleInput(GetLocalPlayerIdentity());
     }
 
     private void HandleInput(Cell.Owner me)
     {
-        Vector3Int pos = board.tilemap.WorldToCell(Camera.main.ScreenToWorldPoint(Input.mousePosition));
+        // 1. 直接获取鼠标在世界空间的位置 (Z轴归零)
+        Vector3 worldPos = Camera.main.ScreenToWorldPoint(Input.mousePosition);
+        worldPos.z = 0;
+
+        // 2. 【核心修正】动态计算偏移量
+        // 获取你的格子设置的高度 (你设置的是 0.6)
+        float cellHeight = gridParent.GetComponent<Grid>().cellSize.y;
         
+        // 因为你的 Tilemap Anchor Y 设为了 0 (底部)，
+        // 当你点击菱形视觉中心时，由于透视关系，逻辑坐标其实偏高了。
+        // 我们要把鼠标坐标向下修正 "半个格子高度"，让它去寻找“脚底”对应的锚点。
+        worldPos.y -= clickOffsetY; 
+
+        // 3. 转为格子坐标
+        Vector3Int pos = board.tilemap.WorldToCell(worldPos);
         // 越界检查
         if (!grid.InBounds(pos.x, pos.y)) return;
         
@@ -241,22 +423,31 @@ public class Game : NetworkBehaviour
             if (me == Cell.Owner.PlayerA && pos.x >= width / 2) return;
             if (me == Cell.Owner.PlayerB && pos.x < width / 2) return;
         }
-
-        // --- 鼠标左键：翻开 / 占领 / 攻击 ---
+        // --- 鼠标左键：翻开 / 释放技能 ---
         if (Input.GetMouseButtonDown(0)) 
         {
-            // 原来叫 RequestRevealServerRpc，现在统一用 RequestActionServerRpc
+            Debug.Log("点击了鼠标左键！");
+            // [修改点] 这里改成 deckManager.currentSelectedUI
+            if (deckManager != null && deckManager.currentSelectedUI != null)
+            {
+                // [修改点] 通过 UI 获取内部的数据 (data)
+                CardData card = deckManager.currentSelectedUI.data;
+                
+                // 发送技能请求
+                RequestSkillServerRpc(card.skillType, pos.x, pos.y);
+                
+                return; // 拦截掉普通的 REVEAL
+            }
+
+            // B. 如果没有卡牌，执行普通的翻开
             RequestActionServerRpc(pos.x, pos.y, "REVEAL");
         }
+
         // --- 鼠标右键：插旗 (新增) ---
         else if (Input.GetMouseButtonDown(1))
         {
             // 插旗不消耗回合，所以它不走 EndTurn 流程，独立使用 RequestFlagServerRpc
             RequestFlagServerRpc(pos.x, pos.y);
-        }
-        else if (Input.GetMouseButtonDown(2))
-        {
-            RequestSkillServerRpc(SkillType.Unchord, pos.x, pos.y);
         }
         if (Input.GetMouseButton(2))
         {
@@ -271,15 +462,10 @@ public class Game : NetworkBehaviour
             ClearAllChordedFlagsLocal();
         }
         // --- T键：建塔 ---
-        else if (Input.GetKeyDown(KeyCode.T)) 
-        {
-            RequestActionServerRpc(pos.x, pos.y, "TOWER");
-        }
-        // --- K键：埋设陷阱 (新增功能) ---
-        else if (Input.GetKeyDown(KeyCode.K)) 
-        {
-            RequestActionServerRpc(pos.x, pos.y, "TRAP");
-        }
+        // else if (Input.GetKeyDown(KeyCode.T)) 
+        // {
+        //     RequestActionServerRpc(pos.x, pos.y, "TOWER");
+        // }
     }
 
     // 纯客户端视觉：高亮周围
@@ -324,17 +510,17 @@ public class Game : NetworkBehaviour
     [ClientRpc]
     private void StartMatchClientRpc()
     {
-        // 所有人（Host 和 Client）同时执行：
+        // [修改] 通知 PrepManager 游戏开始了 (它会负责关闭 WaitingPanel 并通知 DeckManager 发牌)
+        if (prepManager != null) 
+        {
+            prepManager.OnMatchStart();
+        }
 
-        // 1. 关闭候机室
-        if (waitingPanel != null) waitingPanel.SetActive(false);
-
-        // 2. 显示游戏界面
+        // 打开游戏 HUD
         if (gameHUD != null) gameHUD.SetActive(true);
-
         if (gridParent != null) gridParent.SetActive(true);
-
-        Debug.Log("游戏界面已显示，Battle Start!");
+        
+        Debug.Log("游戏正式开始！");
     }
 
     [ServerRpc(RequireOwnership = false)]
@@ -342,10 +528,8 @@ public class Game : NetworkBehaviour
     {
         // 获取发送者的 ID
         ulong senderId = rpc.Receive.SenderClientId;
-        
-        // 核心逻辑：判定发送者是 A 还是 B
-        // 只要是 ID 0 发来的就是 P1，否则就是 P2
-        Cell.Owner sender = (senderId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+
+        if (!matchStarted || !TryResolveNetworkPlayer(senderId, out Cell.Owner sender)) return;
 
         // 校验：如果不是当前回合的玩家在操作，直接拦截
         if (sender != currentTurn.Value) 
@@ -354,7 +538,7 @@ public class Game : NetworkBehaviour
             return;
         }
 
-        Cell cell = grid[x, y];
+        if (!grid.TryGetCell(x, y, out Cell cell)) return;
 
         // 2. 【新增】如果是废墟，禁止操作
         if (cell.isBedrock) return; 
@@ -367,8 +551,7 @@ public class Game : NetworkBehaviour
         switch (action)
         {
             case "REVEAL": success = ProcessReveal(sender, cell); break;
-            case "TOWER": success = ProcessBuildTower(sender, cell); break;
-            case "TRAP": success = ProcessPlaceTrap(sender, cell); break; // 新增埋雷逻辑
+            // case "TOWER": success = ProcessBuildTower(sender, cell); break;
         }
 
         // 如果操作成功，才结束回合
@@ -380,8 +563,7 @@ public class Game : NetworkBehaviour
     {
         // 1. 确定操作者身份
         ulong clientId = rpcParams.Receive.SenderClientId;
-        // Host 判定为 PlayerA，其他 Client 判定为 PlayerB
-        Cell.Owner sender = (clientId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+        if (!matchStarted || !TryResolveNetworkPlayer(clientId, out Cell.Owner sender)) return;
 
         if (grid.TryGetCell(x, y, out Cell cell))
         {
@@ -439,24 +621,56 @@ public class Game : NetworkBehaviour
     {
         // 1. 身份验证
         ulong clientId = rpcParams.Receive.SenderClientId;
-        Cell.Owner sender = (clientId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+        if (!TryResolveNetworkPlayer(clientId, out Cell.Owner sender)) return;
 
-        // 2. 回合检查
-        if (sender != currentTurn.Value) return;
+        // 2. 服务端规则检查：比赛状态、回合、卡组、冷却、费用都不能相信客户端
+        if (!matchStarted || sender != currentTurn.Value) return;
+        if (!TryGetCardData(skillType, out CardData cardData)) return;
+        if (!playerLoadouts.TryGetValue(sender, out HashSet<SkillType> loadout) || !loadout.Contains(skillType))
+        {
+            Debug.LogWarning($"玩家 {sender} 尝试使用未携带的技能 {skillType}。");
+            return;
+        }
+        if (GetServerCooldown(sender, skillType) > 0)
+        {
+            Debug.LogWarning($"玩家 {sender} 尝试使用冷却中的技能 {skillType}。");
+            return;
+        }
+        if (cardData.needTarget && !grid.InBounds(x, y)) return;
+        if (!HasEnoughEnergy(sender, cardData.energyCost)) return;
 
         // 3. 调用 SkillManager 执行逻辑
-        // 注意：ExecuteSkill 内部已经包含了能量检查、数量限制等判定
         bool success = skillManager.ExecuteSkill(skillType, sender, x, y);
 
-        // 4. 如果技能释放成功，消耗回合
+        // 4. 效果成功后，由服务器统一扣费并登记冷却
         if (success)
         {
+            ModifyEnergy(sender, -cardData.energyCost);
+            SetServerCooldown(sender, skillType, cardData.cooldownTurns);
+            ConfirmSkillCastClientRpc(sender, skillType, cardData.cooldownTurns);
             EndTurn();
         }
     }
 
+    [ClientRpc]
+    private void ConfirmSkillCastClientRpc(Cell.Owner owner, SkillType skillType, int cooldownTurns)
+    {
+        // 只有释放技能的那个玩家需要更新 UI
+        if (GetLocalPlayerIdentity() == owner)
+        {
+            if (deckManager != null) 
+            {
+                // 1. 告诉 DeckManager 技能放出去了 (进入冷却 CD)
+                deckManager.OnSkillCastSuccess(skillType, cooldownTurns);
+                
+                // 2. 顺便刷新一下所有卡的状态 (因为能量刚才肯定变了)
+                deckManager.RefreshAllCardsState();
+            }
+        }
+    }
+
     // 发送数据时的辅助包装函数
-    private void SyncCell(Cell c)
+    public void SyncCell(Cell c)
     {
         SyncCellClientRpc(
             c.position.x, 
@@ -473,7 +687,8 @@ public class Game : NetworkBehaviour
             (int)c.trapOwner,    
             c.isBedrock,         
             c.currentDurability,
-            c.isTowerRevealed
+            c.isTowerRevealed,
+            c.jamTurns
         );
     }
 
@@ -481,7 +696,7 @@ public class Game : NetworkBehaviour
     [ClientRpc]
     private void SyncCellClientRpc(int x, int y, int type, int num, int owner, bool rev, 
                                 bool hasT, int tOwner, bool expl, int unlock,
-                                bool trap, int trapOwner, bool bedrock, int dura, bool isTowerRev)
+                                bool trap, int trapOwner, bool bedrock, int dura, bool isTowerRev, int jamTurns)
     {
         if (grid.TryGetCell(x, y, out Cell c))
         {
@@ -499,6 +714,7 @@ public class Game : NetworkBehaviour
             c.isBedrock = bedrock;
             c.currentDurability = dura;
             c.isTowerRevealed = isTowerRev;
+            c.jamTurns = jamTurns;
 
             // 【关键】由于 SyncCell 是公共同步，它不应该修改本地的 flaggedP1/P2。
             // 渲染时 Draw 会自动根据 localPlayer 身份读取本地保存的私有旗子。
@@ -668,7 +884,7 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
         // 应在 RequestFlagServerRpc 中使用定向的 ClientRpcParams 同步给个人
     }
     // 服务器端逻辑：建造防御塔
-    private bool ProcessBuildTower(Cell.Owner player, Cell cell)
+    public bool ProcessBuildTower(Cell.Owner player, Cell cell)
     {
         if (cell == null) return false;
 
@@ -705,14 +921,7 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
             return false;
         }
 
-        // 6. 【能量检查】
-        int currentEnergy = (player == Cell.Owner.PlayerA) ? energyP1.Value : energyP2.Value;
-        if (currentEnergy < costBuildTower ) return false;
-
-        // --- 扣除消耗 ---
-        ModifyEnergy(player, -costBuildTower );
-
-        // 7. 【判定结果】
+        // 6. 【判定结果】费用由 RequestSkillServerRpc 按 CardData 统一处理
         bool isMine = (cell.type == Cell.Type.Mine);
         bool canBuildOnExploded = cell.exploded && cell.owner == player;
         bool isHidden = !cell.revealed;
@@ -766,7 +975,8 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
             (int)cell.trapOwner,   // 陷阱归属
             cell.isBedrock,        // 是否是废墟
             cell.currentDurability, // 当前耐久
-            cell.isTowerRevealed
+            cell.isTowerRevealed,
+            cell.jamTurns
         );
     }
 
@@ -810,11 +1020,12 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
             // 执行原有逻辑：翻开、分配所有权、增加能量
             cell.revealed = true;
             cell.owner = player;
+            cell.unlockTurn = totalTurnCount.Value + cellCooldownRounds;
             // 只有开荒（非抢地）通过 FloodFill 触发时，应用正常的收益逻辑
             ModifyEnergy(player, gainNormal);
 
             // 记录变化坐标用于同步
-            changedCells.Add(new CellSyncData { x = cell.position.x, y = cell.position.y,type = (int)cell.type,number = cell.number });
+            changedCells.Add(new CellSyncData { x = cell.position.x, y = cell.position.y,type = (int)cell.type,number = cell.number,unlockTurn = cell.unlockTurn });
 
             // 如果是空格，继续向四周扩散
             if (cell.type == Cell.Type.Empty)
@@ -854,6 +1065,7 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
                 c.owner = player;
                 c.type = (Cell.Type)data.type;
                 c.number = data.number;
+                c.unlockTurn = data.unlockTurn;
             }
         }
         // 一次性重绘，避免多次重绘造成的掉帧
@@ -872,9 +1084,26 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
             energyP2.Value = Mathf.Clamp(energyP2.Value + amount, 0, maxEnergy);
     }
 
-    private void ModifyHP(Cell.Owner player, int damage)
+    public void ModifyHP(Cell.Owner player, int damage)
     {
-        // damage 传入正数表示扣血
+        // 1. 如果是治疗 (damage < 0)，允许加血，不受无敌影响
+        if (damage < 0)
+        {
+            // 保持原有的加血逻辑
+            if (player == Cell.Owner.PlayerA) hpP1.Value = Mathf.Clamp(hpP1.Value - damage, 0, maxHealth);
+            else hpP2.Value = Mathf.Clamp(hpP2.Value - damage, 0, maxHealth);
+            return;
+        }
+
+        // 2. 【新增】如果是扣血 (damage > 0)，检查无敌状态
+        int currentImmune = (player == Cell.Owner.PlayerA) ? immuneTurnsP1.Value : immuneTurnsP2.Value;
+        if (currentImmune > 0)
+        {
+            Debug.Log($"{player} 处于无敌状态！免疫了 {damage} 点伤害！");
+            return; // 直接跳出，不扣血
+        }
+
+        // 3. 正常扣血逻辑 (保持不变)
         if (player == Cell.Owner.PlayerA)
         {
             hpP1.Value = Mathf.Clamp(hpP1.Value - damage, 0, maxHealth);
@@ -924,40 +1153,50 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
 
     private void UpdateHealthUI(Cell.Owner player, int value)
     {
+        // 1. 获取无敌回合数
+        int immune = (player == Cell.Owner.PlayerA) ? immuneTurnsP1.Value : immuneTurnsP2.Value;
+        
+        // 2. 如果大于0，准备好黄色的[无敌]字样
+        string statusSuffix = (immune > 0) ? " <color=yellow>[无敌]</color>" : "";
+
         if (player == Cell.Owner.PlayerA) {
             if (hpSliderA) hpSliderA.value = (float)value / maxHealth;
-            if (hpTextA) hpTextA.text = $"HP: {value}";
+            
+            // 3. 【关键修改】在字符串末尾加上 {statusSuffix}
+            if (hpTextA) hpTextA.text = $"P1 Health: {value}/100{statusSuffix}";
         } else {
             if (hpSliderB) hpSliderB.value = (float)value / maxHealth;
-            if (hpTextB) hpTextB.text = $"HP: {value}";
+            
+            // 3. 【关键修改】同上
+            if (hpTextB) hpTextB.text = $"P2 Health: {value}/100{statusSuffix}";
         }
     }
 
-    private void SetupCamera()
-    {
-        // 1. 永远居中
-        Vector3 centerPos = new Vector3(width / 2f, height / 2f, -10f);
-        Camera.main.transform.position = centerPos;
+    // private void SetupCamera()
+    // {
+    //     // 1. 永远居中
+    //     Vector3 centerPos = new Vector3(width / 2f, height / 2f, -10f);
+    //     Camera.main.transform.position = centerPos;
 
-        // 2. 基础大小 (基于高度)
-        // OrthographicSize = 高度的一半。如果你的棋盘高度是 16，理论上 size = 8 刚好塞满。
-        // 加一点边距 (比如 + 2)
-        float targetSize = (height / 2f) + 1f; 
+    //     // 2. 基础大小 (基于高度)
+    //     // OrthographicSize = 高度的一半。如果你的棋盘高度是 16，理论上 size = 8 刚好塞满。
+    //     // 加一点边距 (比如 + 2)
+    //     float targetSize = (height / 2f) + 1f; 
 
-        // 3. 宽度适配 (防止两边被切掉)
-        float screenRatio = (float)Screen.width / Screen.height; // 当前屏幕宽高比
-        float boardRatio = (float)width / height;              // 棋盘宽高比 (32/16 = 2.0)
+    //     // 3. 宽度适配 (防止两边被切掉)
+    //     float screenRatio = (float)Screen.width / Screen.height; // 当前屏幕宽高比
+    //     float boardRatio = (float)width / height;              // 棋盘宽高比 (32/16 = 2.0)
 
-        // 如果屏幕比棋盘更“方”（比如手机竖屏，或者非宽屏），宽度就不够了
-        // 这时要基于宽度来反推 Size
-        if (screenRatio < boardRatio)
-        {
-            // 目标 Size = (宽度一半) / 屏幕比例
-            targetSize = (width / 2f + 2f) / screenRatio;
-        }
+    //     // 如果屏幕比棋盘更“方”（比如手机竖屏，或者非宽屏），宽度就不够了
+    //     // 这时要基于宽度来反推 Size
+    //     if (screenRatio < boardRatio)
+    //     {
+    //         // 目标 Size = (宽度一半) / 屏幕比例
+    //         targetSize = (width / 2f + 2f) / screenRatio;
+    //     }
 
-        Camera.main.orthographicSize = targetSize;
-    }
+    //     Camera.main.orthographicSize = targetSize;
+    // }
 
     // 检查并应用防御塔伤害 (AOE + 直接攻击)
     private int CheckAndApplyTowerDefense(Cell.Owner attacker, Cell targetCell)
@@ -1006,7 +1245,24 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
         return totalDamage;
     }
 
+    // 【新增】供 SkillManager 调用
+    public void RegisterJam(int x, int y, int turns)
+    {
+        if (grid.TryGetCell(x, y, out Cell cell))
+        {
+            cell.jamTurns = turns;
+            
+            // 记录到列表里 (防止重复添加)
+            Vector2Int pos = new Vector2Int(x, y);
+            if (!jammedCells.Contains(pos))
+            {
+                jammedCells.Add(pos);
+            }
 
+            // 立即同步一次
+            SyncCell(cell);
+        }
+    }
     private void EndTurn()
     {
         // 1. 检查通路连通性 (若连通则造成伤害)
@@ -1021,6 +1277,44 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
             ModifyHP(Cell.Owner.PlayerA, damageRoadConnected);
         }
 
+        if (IsServer)
+        {
+            for (int i = jammedCells.Count - 1; i >= 0; i--)
+            {
+                Vector2Int pos = jammedCells[i];
+                Cell c = grid[pos.x, pos.y];
+
+                if (c.jamTurns > 0)
+                {
+                    c.jamTurns--;
+                    
+                    // 如果减完归零了，说明效果结束，从名单里踢出去
+                    if (c.jamTurns == 0)
+                    {
+                        jammedCells.RemoveAt(i);
+                        Debug.Log($"({pos.x},{pos.y}) 的阻断效果结束了。");
+                    }
+                    
+                    // 同步状态
+                    SyncCell(c);
+                }
+                else
+                {
+                    // 防御性代码：如果已经是0了还在名单里，直接踢掉
+                    jammedCells.RemoveAt(i);
+                }
+            }
+            // 谁的回合结束了，谁的无敌时间就 -1
+            if (currentTurn.Value == Cell.Owner.PlayerA)
+            {
+                if (immuneTurnsP1.Value > 0) immuneTurnsP1.Value--;
+            }
+            else
+            {
+                if (immuneTurnsP2.Value > 0) immuneTurnsP2.Value--;
+            }
+        }
+
         // 2. 切换回合
         totalTurnCount.Value++;
         
@@ -1028,22 +1322,88 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
             currentTurn.Value = Cell.Owner.PlayerB;
         else
             currentTurn.Value = Cell.Owner.PlayerA;
+
+        ReduceServerCooldowns(currentTurn.Value);
+    }
+
+    private bool TryValidateLoadout(int[] selectedSkillIds, out HashSet<SkillType> loadout)
+    {
+        loadout = new HashSet<SkillType>();
+        if (selectedSkillIds == null || prepManager == null) return false;
+        if (selectedSkillIds.Length < 1 || selectedSkillIds.Length > prepManager.maxCards) return false;
+
+        foreach (int skillId in selectedSkillIds)
+        {
+            SkillType skillType = (SkillType)skillId;
+            if (skillType == SkillType.None || !TryGetCardData(skillType, out _)) return false;
+            if (!loadout.Add(skillType)) return false;
+        }
+
+        return true;
+    }
+
+    private bool TryGetCardData(SkillType skillType, out CardData cardData)
+    {
+        cardData = null;
+        if (prepManager == null || prepManager.allAvailableCards == null) return false;
+
+        foreach (CardData candidate in prepManager.allAvailableCards)
+        {
+            if (candidate != null && candidate.skillType == skillType)
+            {
+                cardData = candidate;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private int GetServerCooldown(Cell.Owner player, SkillType skillType)
+    {
+        if (playerCooldowns.TryGetValue(player, out Dictionary<SkillType, int> cooldowns) &&
+            cooldowns.TryGetValue(skillType, out int turns))
+        {
+            return turns;
+        }
+
+        return 0;
+    }
+
+    private void SetServerCooldown(Cell.Owner player, SkillType skillType, int turns)
+    {
+        if (!playerCooldowns.TryGetValue(player, out Dictionary<SkillType, int> cooldowns))
+        {
+            cooldowns = new Dictionary<SkillType, int>();
+            playerCooldowns[player] = cooldowns;
+        }
+
+        cooldowns[skillType] = Mathf.Max(0, turns);
+    }
+
+    private void ReduceServerCooldowns(Cell.Owner player)
+    {
+        if (!playerCooldowns.TryGetValue(player, out Dictionary<SkillType, int> cooldowns)) return;
+
+        foreach (SkillType skillType in new List<SkillType>(cooldowns.Keys))
+        {
+            cooldowns[skillType] = Mathf.Max(0, cooldowns[skillType] - 1);
+        }
     }
     private bool CheckPathConnection(Cell.Owner player)
     {
         // 定义起点和终点
-        // P1: 左下(0,0) -> 右上(width-1, height-1)
-        // P2: 右上(width-1, height-1) -> 左下(0,0)
-        // 只要能从己方基地连到敌方基地就算通
-        
         Vector2Int startPos = (player == Cell.Owner.PlayerA) ? new Vector2Int(0, 0) : new Vector2Int(width - 1, height - 1);
         Vector2Int targetPos = (player == Cell.Owner.PlayerA) ? new Vector2Int(width - 1, height - 1) : new Vector2Int(0, 0);
 
-        // 如果起点或终点不属于自己，直接断开
-        if (grid[startPos.x, startPos.y].owner != player) return false;
-        if (grid[targetPos.x, targetPos.y].owner != player) return false;
+        // 获取起点和终点的格子对象
+        Cell startCell = grid[startPos.x, startPos.y];
 
-        // BFS 搜索
+        // --- 【修改 1】起点检查 ---
+        // 如果起点不属于自己，或者起点正处于“瘫痪/阻断”状态，直接断开
+        if (startCell.owner != player || startCell.jamTurns > 0) return false;
+
+        // BFS 搜索初始化
         System.Collections.Generic.Queue<Vector2Int> queue = new System.Collections.Generic.Queue<Vector2Int>();
         System.Collections.Generic.HashSet<Vector2Int> visited = new System.Collections.Generic.HashSet<Vector2Int>();
 
@@ -1053,7 +1413,6 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
         while (queue.Count > 0)
         {
             Vector2Int current = queue.Dequeue();
-            if (current == targetPos) return true; // 找到通路
 
             // 检查上下左右
             Vector2Int[] dirs = { Vector2Int.up, Vector2Int.down, Vector2Int.left, Vector2Int.right };
@@ -1066,10 +1425,16 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
                 
                 // 访问检查
                 if (visited.Contains(next)) continue;
+                if (next == targetPos) return true;
 
-                // 核心条件：必须是自己的领地，且不是废墟
                 Cell neighbor = grid[next.x, next.y];
-                if (neighbor.owner == player && !neighbor.isBedrock)
+
+                // --- 【修改 3：核心逻辑】 ---
+                // 必须满足三个条件才能传导信号：
+                // 1. 是自己的领地
+                // 2. 不是废墟/基岩
+                // 3. 没有被阻断 (jamTurns 必须为 0)
+                if (neighbor.owner == player && !neighbor.isBedrock && neighbor.jamTurns == 0)
                 {
                     visited.Add(next);
                     queue.Enqueue(next);
@@ -1080,13 +1445,31 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
     }
 
     // 获取当前客户端是 P1 还是 P2
-    private Cell.Owner GetLocalPlayerIdentity()
+    public Cell.Owner GetLocalPlayerIdentity()
     {
         // 获取本地玩家的唯一 ID
         ulong myId = NetworkManager.Singleton.LocalClientId;
         
-        // 约定：ID 为 0 的（Host）是 PlayerA，其他（Client）是 PlayerB
-        return (myId == 0) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+        return (myId == NetworkManager.ServerClientId) ? Cell.Owner.PlayerA : Cell.Owner.PlayerB;
+    }
+
+    private bool TryResolveNetworkPlayer(ulong clientId, out Cell.Owner player)
+    {
+        if (clientId == NetworkManager.ServerClientId)
+        {
+            player = Cell.Owner.PlayerA;
+            return true;
+        }
+
+        if (playerBClientId.HasValue && clientId == playerBClientId.Value)
+        {
+            player = Cell.Owner.PlayerB;
+            return true;
+        }
+
+        player = Cell.Owner.None;
+        Debug.LogWarning($"忽略未登记客户端 {clientId} 的游戏请求。");
+        return false;
     }
 
     // 检查能量是否足够
@@ -1105,5 +1488,22 @@ public bool ProcessReveal(Cell.Owner player, Cell cell)
         if (player == Cell.Owner.PlayerA) trapCountP1++;
         else trapCountP2++;
     }
+
+#if DEVELOPMENT_BUILD || UNITY_EDITOR
+    public void E2ERequestReveal(int x, int y)
+    {
+        RequestActionServerRpc(x, y, "REVEAL");
+    }
+
+    public void E2ERequestSkill(SkillType skillType, int x, int y)
+    {
+        RequestSkillServerRpc(skillType, x, y);
+    }
+
+    public int E2EGetEnergy(Cell.Owner player)
+    {
+        return player == Cell.Owner.PlayerA ? energyP1.Value : energyP2.Value;
+    }
+#endif
 
 }

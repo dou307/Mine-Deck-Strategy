@@ -41,11 +41,7 @@ public class ConnectionUI : MonoBehaviour
     {
         try
         {
-            await UnityServices.InitializeAsync();
-            if (!AuthenticationService.Instance.IsSignedIn)
-            {
-                await AuthenticationService.Instance.SignInAnonymouslyAsync();
-            }
+            await RelayManager.Instance.EnsureServicesReadyAsync();
             Debug.Log("Unity Services 初始化完成, ID: " + AuthenticationService.Instance.PlayerId);
             
             // 初始化完成后，自动刷新一次列表
@@ -58,37 +54,55 @@ public class ConnectionUI : MonoBehaviour
     }
 
     // --- Host 流程 ---
+
     public async void OnHostClicked()
     {
-        // 1. 调用 RelayManager 创建房间 (它内部会自动处理 WSS 协议和 StartHost)
-        // 注意：这里假设你的 RelayManager.CreateRelay() 返回的是 Task<string> joinCode
+        // 1. 创建房间
         string code = await RelayManager.Instance.CreateRelay();
 
         if (!string.IsNullOrEmpty(code))
         {
-            currentJoinCode = code;
-            Debug.Log("房间创建成功, Code: " + currentJoinCode);
-            if (codeText != null) codeText.text = "Code: " + currentJoinCode;
+            currentJoinCode = code; // 本地 UI 存一份
+            
+            // --- 【核心步骤：传递给 Game.cs】 ---
+            // FindObjectOfType 可以找到场景里挂载了 Game 脚本的物体
+            Game gameLogic = FindObjectOfType<Game>();
+            if (gameLogic != null)
+            {
+                gameLogic.currentJoinCode = code;
+                Debug.Log($"已将 JoinCode {code} 传递给 Game 逻辑层");
+            }
+            else
+            {
+                Debug.LogError("严重错误：场景中找不到 Game 组件！无法同步房间号！");
+            }
+            // ----------------------------------
 
-            // 2. 上传到 Supabase (保留你原有的逻辑)
+            // 2. 上传到 Supabase (保持你原有的逻辑)
             if (lobbyManager != null)
             {
+                // 记得：这里要用带 status 参数的新版 PostRoom
                 string roomName = "Player " + UnityEngine.Random.Range(100, 999) + "'s Room";
-                lobbyManager.PostRoom(currentJoinCode, roomName);
+                lobbyManager.PostRoom(currentJoinCode, roomName); 
             }
 
             // 3. UI 切换
             if (panel != null) panel.SetActive(false);
             if (waitingPanel != null) waitingPanel.SetActive(true);
-        }
-        else
-        {
-            Debug.LogError("Host 失败: 无法从 RelayManager 获取 JoinCode");
+             if (codeText != null)
+            {
+                codeText.text = "房间号: " + code; // 或者直接 codeText.text = code;
+                Debug.Log("UI 已更新房间号: " + code);
+            }
+            else
+            {
+                Debug.LogError("忘了在 Inspector 里拖拽 Code Text 组件！");
+            }
         }
     }
 
     // --- Join 流程 (旧版手动输入) ---
-    public async void OnJoinClicked()
+    public void OnJoinClicked()
     {
         string code = joinInput.text;
         JoinRelayGame(code);
@@ -137,17 +151,17 @@ public class ConnectionUI : MonoBehaviour
         {
             GameObject newItem = Instantiate(roomItemPrefab, roomListContent);
             
-            // 设置文字
-            TMP_Text t = newItem.GetComponentInChildren<TMP_Text>();
-            if (t) t.text = $"{room.room_name} (点击加入)";
-
-            // 设置点击事件 (Lambda表达式闭包)
-            Button b = newItem.GetComponent<Button>();
-            if (b) 
+            // --- 【核心修改】使用 RoomItem 脚本来设置状态 ---
+            RoomItem itemScript = newItem.GetComponent<RoomItem>();
+            
+            if (itemScript != null)
             {
-                b.onClick.AddListener(() => {
-                    JoinRelayGame(room.join_code);
-                });
+                // 把房间数据传进去，同时传入点击回调 JoinRelayGame
+                itemScript.Setup(room, (code) => JoinRelayGame(code));
+            }
+            else
+            {
+                Debug.LogError("你的 Prefab 上没挂 RoomItem 脚本！");
             }
         }
     }

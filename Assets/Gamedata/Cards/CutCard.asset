@@ -1,0 +1,22 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: e88c145358e881f4a9a142a0128f5860, type: 3}
+  m_Name: CutCard
+  m_EditorClassIdentifier: 
+  cardName: "\u7535\u8DEF\u5207\u65AD"
+  description: "\u201C\u68C0\u6D4B\u5230\u9AD8\u5371\u8FDE\u63A5\uFF0C\u5F3A\u5236\u7194\u65AD\u8282\u70B9\u534F\u8BAE\u3002\u201D\n\u6548\u679C\uFF1A\u9009\u62E9\u4E00\u4E2A\u654C\u65B9\u5360\u9886\u7684\u683C\u5B50\uFF08\u5904\u654C\u65B9\u57FA\u5730\uFF09\u3002\u4F7F\u5176\u5728\u63A5\u4E0B\u6765\u7684
+    3\u4E2A\u56DE\u5408 \u5185\u5904\u4E8E\u762B\u75EA\u72B6\u6001\u3002\n\u762B\u75EA\u6548\u679C\uFF1A\u8BE5\u683C\u5B50\u867D\u7136\u4ECD\u5C5E\u4E8E\u654C\u4EBA\uFF0C\u4F46\u5728\u8BA1\u7B97\u201C\u57FA\u5730\u8FDE\u901A\u6027\u201D\u65F6\u89C6\u4E3A\u65AD\u8DEF\uFF08\u65E0\u6CD5\u4F20\u9012\u8FDE\u63A5\u4FE1\u53F7\uFF09\u3002"
+  icon: {fileID: 21300000, guid: 45fc81435e135b04d83c9dc309b03865, type: 3}
+  skillType: 8
+  energyCost: 40
+  cooldownTurns: 5
+  needTarget: 1
